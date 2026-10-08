@@ -1,6 +1,6 @@
 #!/bin/sh
 # rmon-agent: reports this router's state to the monitoring dashboard.
-# Runs the read-only probe and POSTs its output; started by cron every 2 minutes.
+# Runs the read-only probe and POSTs its output; started by cron (the period is set at install time).
 . /etc/rmon-agent.conf || exit 1
 PROBE=/usr/lib/rmon/probe.sh
 # spread routers across the minute so they do not all report at once

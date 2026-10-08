@@ -524,7 +524,7 @@ chmod 755 /usr/bin/rmon-agent
 for f in /usr/bin/rmon-agent /usr/lib/rmon/ /etc/rmon-agent.conf; do
 	grep -qxF "$f" /etc/sysupgrade.conf 2>/dev/null || echo "$f" >>/etc/sysupgrade.conf
 done
-(crontab -l 2>/dev/null | grep -v rmon-agent; echo '*/2 * * * * /usr/bin/rmon-agent >/dev/null 2>&1 # rmon-agent') | crontab -
+(crontab -l 2>/dev/null | grep -v rmon-agent; echo '*/{max(1, config.POLL_INTERVAL // 60)} * * * * /usr/bin/rmon-agent >/dev/null 2>&1 # rmon-agent') | crontab -
 /etc/init.d/cron enable >/dev/null 2>&1 || true
 /etc/init.d/cron restart >/dev/null 2>&1 || true
 if /usr/bin/rmon-agent now </dev/null; then

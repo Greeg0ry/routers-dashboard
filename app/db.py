@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -10,6 +11,11 @@ _conn = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None)
 _conn.row_factory = sqlite3.Row
 _conn.execute("PRAGMA journal_mode=WAL")
 _conn.execute("PRAGMA synchronous=NORMAL")
+for _suffix in ("", "-wal", "-shm"):
+    try:
+        os.chmod(f"{DB_PATH}{_suffix}", 0o600)
+    except OSError:
+        pass
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (

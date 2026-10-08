@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import hmac
+import html
 import logging
 import re
 import time
@@ -59,6 +61,8 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
+    if config.COOKIE_SECURE:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
     if request.url.path.startswith("/luci/"):
         # LuCI needs inline scripts, and its stray absolute requests are routed by Referer
         response.headers["Referrer-Policy"] = "same-origin"
@@ -75,7 +79,21 @@ async def security_headers(request: Request, call_next):
 # --- auth ----------------------------------------------------------------------
 
 _failures: dict[str, list[float]] = {}
+_lock_alerted: dict[str, float] = {}
 MAX_FAILURES, FAILURE_WINDOW = 5, 300
+# Sessions are signed cookies, so they cannot be revoked one by one; binding them to the
+# password hash makes a password change (or a new SESSION_SECRET) sign everybody out.
+SESSION_VERSION = hashlib.sha256((config.ADMIN_PASSWORD_HASH + config.SESSION_SECRET).encode()).hexdigest()[:16]
+
+
+def authed(request: Request) -> bool:
+    session = request.session
+    return bool(session.get("user")) and session.get("v") == SESSION_VERSION
+
+
+def _notify(text):
+    """Security events go to the owner's Telegram through the normal outbox."""
+    db.x("INSERT INTO outbox (ts, text) VALUES (?, ?)", (db.now(), text))
 
 
 def client_ip(request: Request) -> str:
@@ -83,7 +101,7 @@ def client_ip(request: Request) -> str:
 
 
 def require_user(request: Request):
-    if not request.session.get("user"):
+    if not authed(request):
         raise HTTPException(401, "unauthorized")
 
 
@@ -99,7 +117,13 @@ async def login(request: Request):
     ip = client_ip(request)
     recent = [t for t in _failures.get(ip, []) if t > time.time() - FAILURE_WINDOW]
     if len(recent) >= MAX_FAILURES:
+        if time.time() - _lock_alerted.get(ip, 0) > 3600:
+            _lock_alerted[ip] = time.time()
+            _notify(f"🚫 <b>Подбор пароля к дашборду</b>\n{MAX_FAILURES} неудачных попыток входа с адреса "
+                    f"<code>{html.escape(ip)}</code>, вход с него закрыт на 5 минут.")
         raise HTTPException(429, "Слишком много попыток. Подождите 5 минут.")
+    if int(request.headers.get("content-length") or 0) > 4096:
+        raise HTTPException(413, "too large")
     try:
         body = await request.json()
         username, password = str(body["username"]), str(body["password"])
@@ -115,7 +139,10 @@ async def login(request: Request):
         log.warning("failed login from %s", ip)
         raise HTTPException(401, "Неверный логин или пароль")
     _failures.pop(ip, None)
-    request.session["user"] = config.ADMIN_USER
+    request.session.update(user=config.ADMIN_USER, v=SESSION_VERSION, t=int(time.time()))
+    agent = request.headers.get("user-agent", "")[:120]
+    _notify(f"🔑 <b>Вход в дашборд</b>\nАдрес <code>{html.escape(ip)}</code>\n{html.escape(agent)}\n"
+            "Если это не вы — смените пароль: все сеансы закроются.")
     return {"ok": True}
 
 
@@ -127,14 +154,14 @@ async def logout(request: Request):
 
 @app.get("/")
 async def index(request: Request):
-    if not request.session.get("user"):
+    if not authed(request):
         return RedirectResponse("/login", 302)
     return FileResponse(STATIC / "index.html")
 
 
 @app.get("/login")
 async def login_page(request: Request):
-    if request.session.get("user"):
+    if authed(request):
         return RedirectResponse("/", 302)
     return FileResponse(STATIC / "login.html")
 
@@ -337,7 +364,7 @@ async def luci_root(device_id: str):
 
 @app.api_route("/luci/{device_id}/{path:path}", methods=LUCI_METHODS)
 async def luci(device_id: str, path: str, request: Request):
-    if not request.session.get("user"):
+    if not authed(request):
         if request.method == "GET":
             return RedirectResponse("/login", 302)
         raise HTTPException(401, "unauthorized")
@@ -399,7 +426,7 @@ async def luci(device_id: str, path: str, request: Request):
 async def luci_stray(request: Request):
     """An absolute LuCI URL that escaped rewriting: send it back under the prefix of the page it came from."""
     origin = re.match(r"/luci/[^/]+(?=/)", urlsplit(request.headers.get("referer", "")).path)
-    if not origin or not request.session.get("user"):
+    if not origin or not authed(request):
         raise HTTPException(404, "not found")
     query = f"?{request.url.query}" if request.url.query else ""
     return RedirectResponse(origin[0] + request.scope.get("raw_path", b"").decode("latin-1") + query, 307)

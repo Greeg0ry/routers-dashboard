@@ -5,6 +5,10 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR.parent / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "monitor.db"
+try:
+    DATA_DIR.chmod(0o700)  # the database, the routers' SSH key and run configs are for this user only
+except OSError:
+    pass
 
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "https://monit.rocky-rabbit.ru")
 
@@ -25,7 +29,8 @@ SSH_KEY = os.environ.get("FLEET_SSH_KEY", str(DATA_DIR / "id_ed25519"))
 
 # Polling. COLLECTOR=0 serves the UI from an existing database without probing (local dev).
 COLLECTOR_ENABLED = os.environ.get("COLLECTOR", "1") == "1"
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "120"))
+# Also the period of the router agents' cron line, so it should be a whole number of minutes.
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "300"))
 PROBE_TIMEOUT = int(os.environ.get("PROBE_TIMEOUT", "60"))
 CONCURRENCY = int(os.environ.get("CONCURRENCY", "10"))
 FAIL_THRESHOLD = int(os.environ.get("FAIL_THRESHOLD", "2"))
@@ -40,7 +45,8 @@ SSH_GRACE_SECONDS = int(os.environ.get("SSH_GRACE_SECONDS", "900"))
 # Router agents authenticate with HMAC(AGENT_SECRET, device id). A router whose
 # agent reported within PUSH_FRESH_SECONDS is not polled over SSH.
 AGENT_SECRET = os.environ.get("AGENT_SECRET", "")
-PUSH_FRESH_SECONDS = int(os.environ.get("PUSH_FRESH_SECONDS", "330"))
+# The default tolerates one missed report.
+PUSH_FRESH_SECONDS = int(os.environ.get("PUSH_FRESH_SECONDS", str(POLL_INTERVAL * 2 + 90)))
 
 # Tailnet device names (first DNS label) that are not monitored.
 EXCLUDE = set(os.environ.get("EXCLUDE", "").split())
