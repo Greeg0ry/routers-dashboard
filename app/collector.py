@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from datetime import datetime
+from urllib.parse import urlsplit
 
 import asyncssh
 
@@ -14,6 +15,8 @@ from .alerts import human
 log = logging.getLogger("monitor.collector")
 
 CHECKS = ["reach", "internet", "zapret", "forkop", "google", "youtube", "chatgpt", "discord"]
+# Checked as a pool of addresses; a failure counts once it has lasted SERVICE_FAIL_SECONDS.
+SERVICES = ("google", "youtube", "chatgpt", "discord")
 # A failing parent explains its children, so only the parent is alerted.
 PARENT = {
     "internet": "reach",
@@ -121,14 +124,17 @@ async def ssh_probe(dev):
 
 # --- evaluation ----------------------------------------------------------------
 
-def _site(kv, key):
-    parts = kv.get("site_" + key, "").split()
-    code = parts[0] if parts else "000"
-    try:
-        ms = int(float(parts[1]) * 1000)
-    except (IndexError, ValueError):
-        ms = None
-    return code, ms
+def _pool(kv, name):
+    """One service pool from the probe: [(host, http_code, ms)]."""
+    parts = kv.get("pool_" + name, "").split()
+    pool = []
+    for url, code, seconds in zip(parts[0::3], parts[1::3], parts[2::3]):
+        try:
+            ms = int(float(seconds) * 1000)
+        except ValueError:
+            ms = None
+        pool.append((urlsplit(url).hostname or url, code, ms))
+    return pool
 
 
 def _int(value, default=0):
@@ -138,58 +144,53 @@ def _int(value, default=0):
         return default
 
 
-def _http_problem(code):
-    return "нет соединения" if code == "000" else f"HTTP {code}"
+def _eval_pool(kv, name):
+    """Any HTTP answer means the address is reachable; the service needs all of them."""
+    pool = _pool(kv, name)
+    if not pool:
+        return "unknown", "проба не вернула данных"
+    dead = [host for host, code, _ in pool if code == "000"]
+    if dead:
+        return "fail", f"нет соединения ({len(dead)} из {len(pool)}): " + ", ".join(dead)
+    return "ok", f"{len(pool)} адр. · {pool[0][2]} мс"
 
 
 def _eval_sites(kv, res, info):
     if kv.get("curl") != "1":
-        for name in ("internet", "google", "youtube", "chatgpt", "discord"):
+        for name in ("internet", *SERVICES):
             res[name] = ("unknown", "на роутере нет curl")
         return
-    ya, ya_ms = _site(kv, "ya")
-    google, google_ms = _site(kv, "google")
-    if ya != "000":
-        res["internet"] = ("ok", f"ya.ru · {ya_ms} мс")
-        info["latency"] = ya_ms
-    elif google != "000":
+    if "pool_internet" not in kv:
+        # a router agent still running the previous probe; it updates itself on this report
+        for name in ("internet", *SERVICES):
+            res[name] = ("unknown", "проба на роутере обновляется")
+        return
+    ya = _pool(kv, "internet")
+    google = _pool(kv, "google")
+    if ya and ya[0][1] != "000":
+        res["internet"] = ("ok", f"ya.ru · {ya[0][2]} мс")
+        info["latency"] = ya[0][2]
+    elif any(code != "000" for _, code, _ in google):
         res["internet"] = ("ok", "ya.ru не ответил, google.com отвечает")
     else:
         res["internet"] = ("fail", "ya.ru и google.com не отвечают")
 
-    res["google"] = ("ok", f"{google_ms} мс") if google == "204" else ("fail", _http_problem(google))
-
-    yt, yt_ms = _site(kv, "youtube")
-    gv, _ = _site(kv, "googlevideo")
-    problems = []
-    if yt != "204":
-        problems.append(f"youtube.com: {_http_problem(yt)}")
-    if gv != "204":
-        problems.append(f"googlevideo.com: {_http_problem(gv)}")
-    res["youtube"] = ("fail", "; ".join(problems)) if problems else ("ok", f"{yt_ms} мс")
+    # Voice (UDP) and the video CDN nodes are not covered by any pool.
+    for name in SERVICES:
+        res[name] = _eval_pool(kv, name)
 
     # chatgpt.com itself answers curl with a Cloudflare 403 even when it works,
-    # so judge by the API (401 = reachable, 403 = country blocked) and exit country.
-    api, api_ms = _site(kv, "openai")
+    # so judge by the API (403 = country blocked) and the exit country.
+    api = next((code for host, code, _ in _pool(kv, "chatgpt") if host == "api.openai.com"), "000")
     trace = dict(p.split("=", 1) for p in kv.get("site_gpttrace", "").split() if "=" in p)
     loc = trace.get("loc")
     if loc:
         info["gpt_loc"] = loc
-    if api == "401" or (loc and loc != "RU" and api != "403"):
-        res["chatgpt"] = ("ok", f"выход через {loc}" if loc else f"{api_ms} мс")
-    elif api == "403" or loc == "RU":
-        res["chatgpt"] = ("fail", f"страна не поддерживается ({loc or '?'}) — трафик идёт мимо прокси")
-    else:
-        res["chatgpt"] = ("fail", "нет соединения")
-
-    # Any HTTP answer means the domain is reachable; voice (UDP) is not covered.
-    domains = {"discord": "discord.com", "discord_gw": "gateway.discord.gg",
-               "discord_cdn": "cdn.discordapp.com", "discord_media": "media.discordapp.net"}
-    dead = [domain for key, domain in domains.items() if _site(kv, key)[0] == "000"]
-    if dead:
-        res["discord"] = ("fail", "нет соединения: " + ", ".join(dead))
-    else:
-        res["discord"] = ("ok", f"{len(domains)} домена · {_site(kv, 'discord')[1]} мс")
+    if res["chatgpt"][0] == "ok":
+        if api == "403" or loc == "RU":
+            res["chatgpt"] = ("fail", f"страна не поддерживается ({loc or '?'}) — трафик идёт мимо прокси")
+        elif loc:
+            res["chatgpt"] = ("ok", f"выход через {loc} · {res['chatgpt'][1]}")
 
 
 def _eval_zapret(kv, res, info):
@@ -295,20 +296,25 @@ def apply(dev, results, ts):
         prev = prev_rows.get(name)
         since = prev["since"] if prev and prev["status"] == status else ts
         streak = ((prev["streak"] if prev else 0) + 1) if status == "fail" else 0
+        service = name in SERVICES
+        confirmed = ts - since >= config.SERVICE_FAIL_SECONDS if service else streak >= config.FAIL_THRESHOLD
         down = prev["down"] if prev else 0
         down_since = prev["down_since"] if prev else None
         alerted = prev["alerted"] if prev else 0
         muted = prev["muted"] if prev else 0
 
         if status == "fail":
-            if not down and streak >= config.FAIL_THRESHOLD:
+            if not down and confirmed:
                 down, down_since = 1, since
                 db.x("INSERT INTO events (ts, device_id, device_name, check_name, kind, detail) VALUES (?,?,?,?,?,?)",
                      (ts, dev["id"], dev["name"], name, "down", detail))
+        elif down and status == "ok" and service and ts - since < config.SERVICE_RECOVER_SECONDS:
+            # a single good answer between failures is not a recovery yet
+            pass
         elif down:
             # unknown / n/a clear the failure silently: there is nothing to confirm
             if status == "ok":
-                duration = ts - (down_since or ts)
+                duration = since - (down_since or since)
                 db.x("INSERT INTO events (ts, device_id, device_name, check_name, kind, detail, duration) VALUES (?,?,?,?,?,?,?)",
                      (ts, dev["id"], dev["name"], name, "up", detail, duration))
                 if alerted:

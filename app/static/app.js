@@ -16,6 +16,7 @@ const ICON = {
   bell: svg('<path d="M6 9a6 6 0 0 1 12 0c0 6 2.5 7 2.5 7h-17S6 15 6 9z"/><path d="M10 20a2 2 0 0 0 4 0"/>'),
   bellOff: svg('<path d="M8.6 4.1A6 6 0 0 1 18 9c0 2.3.4 3.9.9 5M6.3 7.2A6 6 0 0 0 6 9c0 6-2.5 7-2.5 7H16"/><path d="M10 20a2 2 0 0 0 4 0"/><path d="M3 3l18 18"/>'),
   close: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
+  external: svg('<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>'),
   refresh: svg('<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>'),
 };
 ICON[''] = ICON.na;
@@ -87,18 +88,21 @@ function toast(text) {
   toast.timer = setTimeout(() => t.classList.remove('show'), 2600);
 }
 
+// A failed poll becomes a failure only once the collector has confirmed it (services: 15 minutes).
+const failed = (c) => Boolean(c && c.status === 'fail' && c.down);
+
 function overall(d) {
   const c = d.checks;
   if (!c.reach || c.reach.status === 'unknown') return 'nodata';
   if (c.reach.status === 'fail') return 'offline';
-  return CHECKS.some((k) => c[k] && c[k].status === 'fail') ? 'problem' : 'ok';
+  return CHECKS.some((k) => failed(c[k])) ? 'problem' : 'ok';
 }
 
 function checkTip(name, c) {
   if (!c) return `${LABEL[name]}: нет данных`;
   let text = `${LABEL[name]}: ${STATUS[c.status]}`;
   if (c.detail && c.status !== 'na') text += `\n${c.detail}`;
-  if (c.status === 'fail' && !c.down) text += '\nпервая неудача, перепроверяется';
+  if (c.status === 'fail' && !c.down) text += '\nсбой ещё не подтверждён, перепроверяется';
   if (c.since && c.status !== 'na') text += `\nуже ${dur(now() - c.since)}`;
   if (c.muted) text += '\nуведомления отключены';
   return text;
@@ -139,9 +143,9 @@ function renderTiles(devices) {
   for (const name of CHECKS.slice(1)) {
     let ok = 0, fail = 0;
     for (const d of devices) {
-      const s = d.checks[name] && d.checks[name].status;
-      if (s === 'ok') ok++;
-      else if (s === 'fail') fail++;
+      const c = d.checks[name];
+      if (failed(c)) fail++;
+      else if (c && (c.status === 'ok' || c.status === 'fail')) ok++;
     }
     tiles.append(h('button', {
       class: 'tile' + (state.check === name ? ' active' : ''),
@@ -196,7 +200,7 @@ function visibleDevices(devices) {
     .filter((d) => {
       const o = overall(d);
       if (state.filter !== 'all' && o !== state.filter) return false;
-      if (state.check && !(d.checks[state.check] && d.checks[state.check].status === 'fail')) return false;
+      if (state.check && !failed(d.checks[state.check])) return false;
       if (!query) return true;
       return [d.name, d.hostname, d.ip, d.info.model, d.info.release].some((v) => v && String(v).toLowerCase().includes(query));
     })
@@ -366,9 +370,14 @@ function renderDrawer() {
     await Promise.all([load(), loadDetail()]);
   } }, h('span', { html: d.muted ? ICON.bellOff : ICON.bell }), d.muted ? 'Уведомления отключены' : 'Уведомления включены');
 
+  const luciBtn = h('a', {
+    class: 'btn', href: `/luci/${encodeURIComponent(d.id)}/`, target: '_blank', rel: 'noopener',
+    'data-tip': 'Веб-интерфейс роутера через дашборд, без подключения к tailscale',
+  }, h('span', { html: ICON.external }), 'LuCI');
+
   const actions = h('div', { class: 'actions' },
     h('span', { class: `status-pill ${o}` }, OVERALL[o]),
-    h('div', { class: 'spacer' }), muteBtn, probeBtn);
+    h('div', { class: 'spacer' }), luciBtn, muteBtn, probeBtn);
 
   const ranges = h('div', { class: 'segmented' }, [[24, '24 ч'], [168, '7 дней'], [720, '30 дней']].map(([hrs, label]) =>
     h('button', { 'aria-pressed': String(state.hours === hrs), onclick: () => { state.hours = hrs; renderDrawer(); loadDetail(); } }, label)));

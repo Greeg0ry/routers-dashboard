@@ -9,31 +9,50 @@ trap 'rm -rf "$T"' EXIT INT TERM
 kv() { printf '%s\t%s\n' "$1" "$(printf '%s' "$2" | tr '\n\t' '  ')"; }
 yn() { "$@" >/dev/null 2>&1 && echo 1 || echo 0; }
 
-# --- site checks, in parallel -------------------------------------------------
+# --- service pools, in parallel -----------------------------------------------
+# A pool is every address a service needs to work fully. Each pool is one curl
+# process fetching its URLs in parallel, so a weak router is not flooded with
+# processes. Output per URL: "url http_code seconds".
+POOLS="internet google youtube chatgpt discord"
 SITES=""
-fetch() { curl -s -o /dev/null -m 10 -w '%{http_code} %{time_total} %{remote_ip}' "$1" 2>/dev/null; }
-site() {
+fetch() {
+	args=""
+	for u in "$@"; do
+		# the Cloudflare trace body names the exit country, keep it
+		case "$u" in */cdn-cgi/trace) args="$args -o $T/trace $u" ;; *) args="$args -o /dev/null $u" ;; esac
+	done
+	curl -s -Z -m 10 -w '%{url_effective} %{http_code} %{time_total}\n' $args 2>/dev/null
+}
+pool() {
+	name=$1
+	shift
 	(
-		r=$(fetch "$2")
+		fetch "$@" >"$T/p_$name.1"
 		# one retry so a single lost handshake is not reported as an outage
-		case "$r" in 000*) r=$(fetch "$2") ;; esac
-		echo "$r" >"$T/$1"
+		dead=$(awk '$2 == "000" { print $1 }' "$T/p_$name.1")
+		if [ -n "$dead" ]; then
+			awk '$2 != "000"' "$T/p_$name.1" >"$T/p_$name"
+			fetch $dead >>"$T/p_$name"
+		else
+			mv "$T/p_$name.1" "$T/p_$name"
+		fi
 	) </dev/null >/dev/null 2>&1 &
 	SITES="$SITES $!"
 }
 if command -v curl >/dev/null 2>&1; then
 	kv curl 1
-	site ya https://ya.ru/
-	site google https://www.google.com/generate_204
-	site youtube https://www.youtube.com/generate_204
-	site googlevideo https://manifest.googlevideo.com/generate_204
-	site openai https://api.openai.com/v1/models
-	site discord https://discord.com/api/v9/gateway
-	site discord_gw https://gateway.discord.gg/
-	site discord_cdn https://cdn.discordapp.com/
-	site discord_media https://media.discordapp.net/
-	(curl -s -m 10 https://chatgpt.com/cdn-cgi/trace 2>/dev/null | grep -E '^(loc|colo)=' | tr '\n' ' ' >"$T/gpttrace") </dev/null >/dev/null 2>&1 &
-	SITES="$SITES $!"
+	pool internet https://ya.ru/
+	pool google https://www.google.com/generate_204 https://www.gstatic.com/generate_204 \
+		https://accounts.google.com/generate_204 https://www.googleapis.com/generate_204
+	pool youtube https://www.youtube.com/generate_204 https://youtubei.googleapis.com/generate_204 \
+		https://i.ytimg.com/generate_204 https://yt3.ggpht.com/generate_204 \
+		https://manifest.googlevideo.com/generate_204
+	pool chatgpt https://api.openai.com/v1/models https://chatgpt.com/cdn-cgi/trace \
+		https://auth.openai.com/ https://cdn.oaistatic.com/ https://ab.chatgpt.com/
+	pool discord https://discord.com/api/v9/gateway https://gateway.discord.gg/ \
+		https://cdn.discordapp.com/ https://media.discordapp.net/ https://images-ext-1.discordapp.net/ \
+		https://discord.gg/ https://dl.discordapp.net/ https://updates.discord.com/ \
+		https://latency.discord.media/rtc
 else
 	kv curl 0
 fi
@@ -78,9 +97,10 @@ done
 
 # --- collect ------------------------------------------------------------------
 [ -n "$SITES" ] && wait $SITES
-for f in ya google youtube googlevideo openai gpttrace discord discord_gw discord_cdn discord_media; do
-	kv "site_$f" "$(cat "$T/$f" 2>/dev/null)"
+for f in $POOLS; do
+	kv "pool_$f" "$(cat "$T/p_$f" 2>/dev/null)"
 done
+kv site_gpttrace "$(grep -E '^(loc|colo)=' "$T/trace" 2>/dev/null)"
 
 if [ -n "$FP" ]; then
 	i=0

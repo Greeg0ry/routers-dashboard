@@ -213,6 +213,7 @@ td .strip { width: 168px; margin: 0 auto; }
   height: 36px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--line-strong); background: var(--surface);
   display: inline-flex; align-items: center; gap: 8px; font-weight: 550;
 }
+a.btn { color: inherit; text-decoration: none; }
 .btn:hover { background: var(--surface-2); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.primary:hover { filter: brightness(1.08); background: var(--accent); }

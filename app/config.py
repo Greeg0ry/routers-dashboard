@@ -29,6 +29,10 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "120"))
 PROBE_TIMEOUT = int(os.environ.get("PROBE_TIMEOUT", "60"))
 CONCURRENCY = int(os.environ.get("CONCURRENCY", "10"))
 FAIL_THRESHOLD = int(os.environ.get("FAIL_THRESHOLD", "2"))
+# Google, YouTube, ChatGPT, Discord: a failure is recorded once the service has been
+# failing this long, and cleared once it has been answering again for this long.
+SERVICE_FAIL_SECONDS = int(os.environ.get("SERVICE_FAIL_SECONDS", "900"))
+SERVICE_RECOVER_SECONDS = int(os.environ.get("SERVICE_RECOVER_SECONDS", "300"))
 RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "30"))
 AUTH_RETRY_SECONDS = 1800
 SSH_GRACE_SECONDS = int(os.environ.get("SSH_GRACE_SECONDS", "900"))

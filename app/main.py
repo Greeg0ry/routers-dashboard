@@ -1,14 +1,19 @@
 import asyncio
 import hmac
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
+
+import httpx
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import alerts, collector, config, db
@@ -50,10 +55,14 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    if request.url.path.startswith("/luci/"):
+        # LuCI needs inline scripts, and its stray absolute requests are routed by Referer
+        response.headers["Referrer-Policy"] = "same-origin"
+        return response
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     )
-    response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     if request.url.path.startswith("/api/") or request.url.path in ("/", "/login"):
         response.headers["Cache-Control"] = "no-store"
@@ -237,6 +246,108 @@ async def agent_install(device_id: str, token: str):
     if not collector.agent_auth(device_id, token):
         raise HTTPException(403, "forbidden")
     return PlainTextResponse(collector.install_script(device_id))
+
+
+# --- LuCI proxy ------------------------------------------------------------------
+# /luci/<device id>/... is fetched from the router's web interface over tailscale,
+# so the admin pages open in the browser without joining the tailnet. LuCI builds
+# its URLs from absolute paths; they get the prefix in HTML, redirects and cookies.
+
+LUCI_METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE"]
+_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
+        "transfer-encoding", "upgrade"}
+_REQUEST_DROP = _HOP | {"host", "cookie", "origin", "referer", "accept-encoding", "x-real-ip",
+                        "x-forwarded-for", "x-forwarded-proto"}
+_RESPONSE_DROP = _HOP | {"content-length", "content-encoding", "location", "set-cookie"}
+_LUCI_ABS = re.compile(rb"""(["'=(]\s*)(\\?/)(cgi-bin|luci-static|ubus)(?=[\\/"'?])""")
+_luci_client = httpx.AsyncClient(verify=False, timeout=httpx.Timeout(120, connect=15))
+_luci_scheme: dict[str, str] = {}
+
+
+def _luci_location(value: str, ip: str, prefix: str) -> str:
+    target = urlsplit(value)
+    if target.hostname == ip or (not target.netloc and value.startswith("/")):
+        return prefix + (target.path or "/") + (f"?{target.query}" if target.query else "")
+    return value
+
+
+@app.api_route("/luci/{device_id}", methods=["GET"])
+async def luci_root(device_id: str):
+    return RedirectResponse(f"/luci/{device_id}/", 302)
+
+
+@app.api_route("/luci/{device_id}/{path:path}", methods=LUCI_METHODS)
+async def luci(device_id: str, path: str, request: Request):
+    if not request.session.get("user"):
+        if request.method == "GET":
+            return RedirectResponse("/login", 302)
+        raise HTTPException(401, "unauthorized")
+    row = db.one("SELECT ip FROM devices WHERE id = ? AND present = 1", (device_id,))
+    if not row or not row["ip"]:
+        raise HTTPException(404, "not found")
+    ip, prefix = row["ip"], f"/luci/{device_id}"
+    raw = request.scope.get("raw_path", b"").decode("latin-1")
+    upstream_path = raw[len(prefix):] if raw.startswith(prefix + "/") else "/" + path
+    scheme = _luci_scheme.get(device_id, "http")
+    url = f"{scheme}://{ip}{upstream_path}" + (f"?{request.url.query}" if request.url.query else "")
+
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in _REQUEST_DROP}
+    # the dashboard session must never reach a router
+    cookies = [c for c in request.headers.get("cookie", "").split("; ") if c and not c.startswith("monit_session=")]
+    if cookies:
+        headers["cookie"] = "; ".join(cookies)
+    headers["accept-encoding"] = "identity"
+    body = request.stream() if request.method in ("POST", "PUT") else None
+    try:
+        upstream = await _luci_client.send(
+            _luci_client.build_request(request.method, url, headers=headers, content=body), stream=True)
+    except httpx.HTTPError as e:
+        return PlainTextResponse(f"Роутер не отвечает: {type(e).__name__}\n", status_code=502)
+
+    out = [(k, v) for k, v in upstream.headers.multi_items() if k.lower() not in _RESPONSE_DROP]
+    location = upstream.headers.get("location")
+    if location:
+        if scheme == "http" and location.startswith(f"https://{ip}"):
+            # LuCI redirects to HTTPS on this router; talk to it that way from now on
+            _luci_scheme[device_id] = "https"
+        out.append(("location", _luci_location(location, ip, prefix)))
+    for cookie in upstream.headers.get_list("set-cookie"):
+        cookie = re.sub(r"(?i);\s*domain=[^;]*", "", cookie)
+        out.append(("set-cookie", re.sub(r"(?i)(;\s*path=)/", rf"\1{prefix}/", cookie)))
+
+    if upstream.headers.get("content-type", "").startswith("text/html"):
+        try:
+            content = await upstream.aread()
+        except httpx.HTTPError as e:
+            return PlainTextResponse(f"Роутер не отвечает: {type(e).__name__}\n", status_code=502)
+        finally:
+            await upstream.aclose()
+        mark = prefix.encode()
+        content = _LUCI_ABS.sub(lambda m: m[1] + mark.replace(b"/", m[2]) + m[2] + m[3], content)
+        response = Response(content, status_code=upstream.status_code)
+    else:
+        length = upstream.headers.get("content-length")
+        if length:
+            out.append(("content-length", length))
+        response = StreamingResponse(upstream.aiter_raw(), status_code=upstream.status_code,
+                                     background=BackgroundTask(upstream.aclose))
+    del response.headers["content-type"]
+    for k, v in out:
+        response.headers.append(k, v)
+    return response
+
+
+async def luci_stray(request: Request):
+    """An absolute LuCI URL that escaped rewriting: send it back under the prefix of the page it came from."""
+    origin = re.match(r"/luci/[^/]+(?=/)", urlsplit(request.headers.get("referer", "")).path)
+    if not origin or not request.session.get("user"):
+        raise HTTPException(404, "not found")
+    query = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(origin[0] + request.scope.get("raw_path", b"").decode("latin-1") + query, 307)
+
+
+for _path in ("/cgi-bin/{rest:path}", "/luci-static/{rest:path}", "/ubus", "/ubus/{rest:path}"):
+    app.add_api_route(_path, luci_stray, methods=LUCI_METHODS)
 
 
 @app.exception_handler(HTTPException)
