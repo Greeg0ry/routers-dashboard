@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Мониторинг роутеров</title>
+  <link rel="icon" href="/static/favicon.svg">
+  <script src="/static/theme.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+      </div>
+      <span>Мониторинг роутеров</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="live" id="live"><i class="pulse"></i><span id="live-text">Загрузка…</span></div>
+    <button class="icon-btn" id="refresh" data-tip="Проверить все роутеры сейчас" aria-label="Проверить сейчас">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+    </button>
+    <button class="icon-btn" id="theme" data-tip="Светлая / тёмная тема" aria-label="Сменить тему">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    </button>
+    <button class="icon-btn" id="logout" data-tip="Выйти" aria-label="Выйти">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+    </button>
+  </header>
+
+  <main>
+    <div id="banner"></div>
+    <section class="tiles" id="tiles" aria-label="Сводка"></section>
+
+    <div class="toolbar">
+      <label class="search">
+        <span class="sr">Поиск</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="search" type="search" placeholder="Поиск по имени, модели, IP" autocomplete="off">
+      </label>
+      <div class="segmented" id="filters" role="group" aria-label="Фильтр"></div>
+      <span id="check-filter"></span>
+    </div>
+
+    <section class="panel table">
+      <table>
+        <thead id="thead"></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty" hidden>Ничего не найдено</div>
+    </section>
+
+    <h2 class="section-title">Последние события</h2>
+    <section class="panel">
+      <ul class="events" id="events"></ul>
+    </section>
+  </main>
+
+  <div class="scrim" id="scrim"></div>
+  <aside class="drawer" id="drawer" aria-hidden="true" role="dialog" aria-label="Роутер"></aside>
+  <div class="tip" id="tip" role="tooltip"></div>
+  <div class="toast" id="toast" role="status"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

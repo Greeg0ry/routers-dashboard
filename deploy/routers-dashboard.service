@@ -1,0 +1,17 @@
+[Unit]
+Description=Routers monitoring dashboard (monit.rocky-rabbit.ru)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=madamada
+WorkingDirectory=/opt/routers-dashboard
+EnvironmentFile=/opt/routers-dashboard/.env
+ExecStart=/opt/routers-dashboard/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8787 --no-access-log
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

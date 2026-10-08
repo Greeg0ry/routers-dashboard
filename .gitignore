@@ -1,0 +1,17 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data: SQLite database and SSH keys
+data/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# IDE / OS
+.idea/
+.DS_Store

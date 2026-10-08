@@ -1,0 +1,521 @@
+'use strict';
+
+const CHECKS = ['reach', 'internet', 'zapret', 'forkop', 'google', 'youtube', 'chatgpt', 'discord'];
+const LABEL = { reach: 'Связь', internet: 'Интернет', zapret: 'zapret', forkop: 'forkop', google: 'Google', youtube: 'YouTube', chatgpt: 'ChatGPT', discord: 'Discord' };
+const SHORT = { reach: 'Связь', internet: 'Инет', zapret: 'zapret', forkop: 'forkop', google: 'Google', youtube: 'YouTube', chatgpt: 'GPT', discord: 'Discord' };
+const STATUS = { ok: 'работает', fail: 'не работает', na: 'не установлен', unknown: 'нет данных', '': 'нет данных' };
+const OVERALL = { ok: 'Всё работает', problem: 'Есть проблемы', offline: 'Не в сети', nodata: 'Нет данных' };
+const REFRESH_MS = 15000;
+
+const svg = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const ICON = {
+  ok: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
+  fail: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
+  unknown: svg('<path d="M9.2 9a3 3 0 1 1 4.3 2.7c-.9.5-1.5 1.1-1.5 2.3"/><path d="M12 17.5v.1"/>'),
+  na: svg('<path d="M7 12h10"/>'),
+  bell: svg('<path d="M6 9a6 6 0 0 1 12 0c0 6 2.5 7 2.5 7h-17S6 15 6 9z"/><path d="M10 20a2 2 0 0 0 4 0"/>'),
+  bellOff: svg('<path d="M8.6 4.1A6 6 0 0 1 18 9c0 2.3.4 3.9.9 5M6.3 7.2A6 6 0 0 0 6 9c0 6-2.5 7-2.5 7H16"/><path d="M10 20a2 2 0 0 0 4 0"/><path d="M3 3l18 18"/>'),
+  close: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
+  refresh: svg('<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>'),
+};
+ICON[''] = ICON.na;
+
+const $ = (id) => document.getElementById(id);
+const state = { data: null, filter: 'all', check: null, search: '', openId: null, detail: null, hours: 24, loadedAt: 0 };
+
+// ---- helpers -----------------------------------------------------------------
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k === 'html') el.innerHTML = v; // only ever fed the ICON constants above
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.append(kid.nodeType ? kid : document.createTextNode(kid));
+  }
+  return el;
+}
+
+function dur(seconds) {
+  seconds = Math.max(0, Math.round(seconds));
+  if (seconds < 90) return `${seconds} с`;
+  const m = Math.floor(seconds / 60);
+  if (m < 90) return `${m} мин`;
+  const hrs = Math.floor(m / 60);
+  if (hrs < 48) return `${hrs} ч`;
+  return `${Math.floor(hrs / 24)} дн`;
+}
+const ago = (ts) => (ts ? `${dur(now() - ts)} назад` : '—');
+const now = () => (state.data ? state.data.now + (Date.now() - state.loadedAt) / 1000 : Date.now() / 1000);
+const pad = (n) => String(n).padStart(2, '0');
+function clock(ts, withDate) {
+  const d = new Date(ts * 1000);
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const today = new Date().toDateString() === d.toDateString();
+  return withDate || !today ? `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${time}` : time;
+}
+function size(kb) {
+  if (kb == null) return '—';
+  return kb >= 1048576 ? `${(kb / 1048576).toFixed(1)} ГБ` : `${Math.round(kb / 1024)} МБ`;
+}
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'monit' },
+    body: JSON.stringify(body),
+  };
+  const r = await fetch(path, opts);
+  if (r.status === 401) {
+    location.href = '/login';
+    throw new Error('unauthorized');
+  }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+  return r.json();
+}
+
+function toast(text) {
+  const t = $('toast');
+  t.textContent = text;
+  t.classList.add('show');
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+function overall(d) {
+  const c = d.checks;
+  if (!c.reach || c.reach.status === 'unknown') return 'nodata';
+  if (c.reach.status === 'fail') return 'offline';
+  return CHECKS.some((k) => c[k] && c[k].status === 'fail') ? 'problem' : 'ok';
+}
+
+function checkTip(name, c) {
+  if (!c) return `${LABEL[name]}: нет данных`;
+  let text = `${LABEL[name]}: ${STATUS[c.status]}`;
+  if (c.detail && c.status !== 'na') text += `\n${c.detail}`;
+  if (c.status === 'fail' && !c.down) text += '\nпервая неудача, перепроверяется';
+  if (c.since && c.status !== 'na') text += `\nуже ${dur(now() - c.since)}`;
+  if (c.muted) text += '\nуведомления отключены';
+  return text;
+}
+
+function badge(name, c) {
+  const status = c ? c.status : 'unknown';
+  const cls = ['badge', status, status === 'fail' && c && !c.down ? 'pending' : '', name === 'reach' ? 'lead' : '', c && c.muted ? 'is-muted' : ''].join(' ');
+  return h('span', { class: cls, html: ICON[status], 'data-tip': checkTip(name, c), role: 'img', 'aria-label': `${LABEL[name]}: ${STATUS[status]}` });
+}
+
+function strip(values, start, bucket) {
+  const el = h('div', { class: 'strip' });
+  values.forEach((v, i) => {
+    const from = start + i * bucket;
+    el.append(h('i', { class: v === 'na' ? '' : v, 'data-tip': `${clock(from, true)} – ${clock(from + bucket)}\n${STATUS[v] || 'нет данных'}` }));
+  });
+  return el;
+}
+
+// ---- overview ----------------------------------------------------------------
+
+function renderTiles(devices) {
+  const tiles = $('tiles');
+  tiles.replaceChildren();
+  const total = devices.length;
+  const offline = devices.filter((d) => overall(d) === 'offline').length;
+  const online = devices.filter((d) => ['ok', 'problem'].includes(overall(d))).length;
+  tiles.append(h('button', {
+    class: 'tile' + (state.filter === 'offline' ? ' active' : ''),
+    onclick: () => setFilter(state.filter === 'offline' ? 'all' : 'offline'),
+  },
+    h('div', { class: 'tile-label' }, 'На связи'),
+    h('div', { class: 'tile-value' }, String(online), h('small', {}, ` / ${total}`)),
+    meter(online, offline, total),
+    h('div', { class: 'tile-note' + (offline ? ' bad' : ' good') }, offline ? `${offline} не в сети` : 'все на связи'),
+  ));
+  for (const name of CHECKS.slice(1)) {
+    let ok = 0, fail = 0;
+    for (const d of devices) {
+      const s = d.checks[name] && d.checks[name].status;
+      if (s === 'ok') ok++;
+      else if (s === 'fail') fail++;
+    }
+    tiles.append(h('button', {
+      class: 'tile' + (state.check === name ? ' active' : ''),
+      'data-tip': fail ? 'Показать роутеры, где не работает' : null,
+      onclick: () => { state.check = state.check === name ? null : name; render(); },
+    },
+      h('div', { class: 'tile-label' }, LABEL[name]),
+      h('div', { class: 'tile-value' }, String(ok), h('small', {}, ` / ${ok + fail}`)),
+      meter(ok, fail, ok + fail),
+      h('div', { class: 'tile-note' + (fail ? ' bad' : ' good') }, fail ? `${fail} не работает` : (ok ? 'везде работает' : 'нет данных')),
+    ));
+  }
+}
+
+function meter(ok, fail, total) {
+  const m = h('div', { class: 'meter' });
+  const add = (cls, n) => {
+    if (!n || !total) return;
+    const i = h('i', { class: cls });
+    i.style.width = `${(100 * n) / total}%`;
+    m.append(i);
+  };
+  add('m-ok', ok);
+  add('m-fail', fail);
+  return m;
+}
+
+function setFilter(f) {
+  state.filter = f;
+  render();
+}
+
+function renderFilters(devices) {
+  const counts = { all: devices.length, problem: 0, offline: 0 };
+  for (const d of devices) {
+    const o = overall(d);
+    if (o === 'problem') counts.problem++;
+    if (o === 'offline') counts.offline++;
+  }
+  const names = { all: 'Все', problem: 'С проблемами', offline: 'Не в сети' };
+  $('filters').replaceChildren(...Object.keys(names).map((f) =>
+    h('button', { 'aria-pressed': String(state.filter === f), onclick: () => setFilter(f) }, names[f], h('span', { class: 'count' }, String(counts[f])))));
+  $('check-filter').replaceChildren(state.check
+    ? h('button', { class: 'chip', onclick: () => { state.check = null; render(); } }, `Не работает: ${LABEL[state.check]}`, h('span', { html: ICON.close }))
+    : '');
+}
+
+function visibleDevices(devices) {
+  const rank = { problem: 0, offline: 1, nodata: 2, ok: 3 };
+  const query = state.search.trim().toLowerCase();
+  return devices
+    .filter((d) => {
+      const o = overall(d);
+      if (state.filter !== 'all' && o !== state.filter) return false;
+      if (state.check && !(d.checks[state.check] && d.checks[state.check].status === 'fail')) return false;
+      if (!query) return true;
+      return [d.name, d.hostname, d.ip, d.info.model, d.info.release].some((v) => v && String(v).toLowerCase().includes(query));
+    })
+    .sort((a, b) => rank[overall(a)] - rank[overall(b)] || a.name.localeCompare(b.name));
+}
+
+function renderTable(data) {
+  $('thead').replaceChildren(h('tr', {},
+    h('th', {}, 'Роутер'),
+    CHECKS.map((c) => h('th', {}, LABEL[c])),
+    h('th', {}, 'Последние 24 часа'),
+    h('th', { class: 'right' }, 'Проверен'),
+  ));
+  const list = visibleDevices(data.devices);
+  const bucket = 86400 / 48;
+  $('rows').replaceChildren(...list.map((d) => {
+    const o = overall(d);
+    const sub = [d.info.model, d.info.release && `OpenWrt ${d.info.release}`].filter(Boolean).join(' · ') || d.ip;
+    return h('tr', { class: o === 'offline' ? 'is-offline' : '', tabindex: '0', onclick: () => openDrawer(d.id), onkeydown: (e) => { if (e.key === 'Enter') openDrawer(d.id); } },
+      h('td', {}, h('div', { class: 'r-name' },
+        h('i', { class: `dot ${o}`, 'data-tip': OVERALL[o] }),
+        h('div', {},
+          h('div', { class: 'r-title' }, d.name, d.muted ? h('span', { html: ICON.bellOff, 'data-tip': 'Уведомления отключены' }) : null),
+          h('div', { class: 'r-sub' }, sub)),
+      )),
+      CHECKS.map((c) => h('td', { 'data-label': SHORT[c] }, badge(c, d.checks[c]))),
+      h('td', { class: 'c-strip' }, d.history && d.history.length ? strip(d.history, data.now - 86400, bucket) : ''),
+      h('td', { class: 'right cell-time' }, d.probe_ts ? ago(d.probe_ts) : '—'),
+    );
+  }));
+  $('empty').hidden = list.length > 0;
+}
+
+function eventLine(e, withDevice) {
+  const down = e.kind === 'down';
+  const what = h('div', { class: 'what' });
+  if (withDevice) what.append(h('button', { class: 'link', onclick: () => openDrawer(e.device_id) }, e.device), ' · ');
+  what.append(h('b', {}, LABEL[e.check] || e.check), down ? ' перестал работать' : ' снова работает');
+  if (down && e.detail) what.append(h('span', {}, ` — ${e.detail}`));
+  if (!down && e.duration != null) what.append(h('span', {}, ` — не работало ${dur(e.duration)}`));
+  return h('li', {},
+    h('span', { class: 'when' }, clock(e.ts)),
+    h('span', { class: `badge ${down ? 'fail' : 'ok'}`, html: ICON[down ? 'fail' : 'ok'] }),
+    what);
+}
+
+function renderEvents(events) {
+  $('events').replaceChildren(...(events.length
+    ? events.map((e) => eventLine(e, true))
+    : [h('li', {}, h('span', { class: 'what' }, h('span', {}, 'Событий пока нет')))]));
+}
+
+function renderLive() {
+  const d = state.data;
+  if (!d) return;
+  const live = $('live');
+  const age = now() - d.last_cycle;
+  live.className = 'live';
+  let text;
+  if (d.error) {
+    live.classList.add('error');
+    text = 'Ошибка опроса';
+  } else if (d.running) {
+    live.classList.add('busy');
+    text = 'Идёт проверка…';
+  } else if (!d.last_cycle) {
+    text = 'Ожидание первой проверки';
+  } else {
+    if (age > d.interval * 3) live.classList.add('stale');
+    text = `Проверено ${dur(age)} назад`;
+  }
+  $('live-text').textContent = text;
+  $('banner').replaceChildren(d.error ? h('div', { class: 'banner' }, `Сборщик не смог выполнить проверку: ${d.error}`) : '');
+}
+
+function render() {
+  const d = state.data;
+  if (!d) return;
+  renderTiles(d.devices);
+  renderFilters(d.devices);
+  renderTable(d);
+  renderEvents(d.events);
+  renderLive();
+}
+
+// ---- drawer ------------------------------------------------------------------
+
+async function openDrawer(id) {
+  state.openId = id;
+  state.detail = null;
+  $('drawer').classList.add('open');
+  $('scrim').classList.add('open');
+  $('drawer').setAttribute('aria-hidden', 'false');
+  renderDrawer();
+  await loadDetail();
+}
+
+function closeDrawer() {
+  state.openId = null;
+  $('drawer').classList.remove('open');
+  $('scrim').classList.remove('open');
+  $('drawer').setAttribute('aria-hidden', 'true');
+}
+
+async function loadDetail() {
+  const id = state.openId;
+  if (!id) return;
+  try {
+    const detail = await api(`/api/devices/${encodeURIComponent(id)}?hours=${state.hours}`);
+    if (state.openId === id) {
+      state.detail = detail;
+      renderDrawer();
+    }
+  } catch (e) {
+    if (e.message !== 'unauthorized') toast(`Не удалось загрузить: ${e.message}`);
+  }
+}
+
+function fact(label, value, extra) {
+  return h('div', {}, h('dt', {}, label), h('dd', {}, value || '—'), extra);
+}
+
+function usage(total, avail) {
+  if (!total) return null;
+  const used = (total - avail) / total;
+  const i = h('i', { class: used > 0.9 ? 'm-fail' : used > 0.75 ? 'm-warn' : 'm-accent' });
+  i.style.width = `${Math.round(used * 100)}%`;
+  return h('div', { class: 'meter' }, i);
+}
+
+function renderDrawer() {
+  const drawer = $('drawer');
+  const base = state.data && state.data.devices.find((x) => x.id === state.openId);
+  const d = state.detail && state.detail.id === state.openId ? state.detail : base;
+  if (!d) {
+    drawer.replaceChildren();
+    return;
+  }
+  const keepScroll = drawer.querySelector('.drawer-body') ? drawer.querySelector('.drawer-body').scrollTop : 0;
+  const o = overall(d);
+  const info = d.info || {};
+  const hist = d.history && d.history.strips ? d.history : null;
+
+  const head = h('div', { class: 'drawer-head' },
+    h('div', { style: null },
+      h('h2', {}, d.name),
+      h('p', {}, [d.ip, d.hostname && d.hostname !== d.name ? `hostname ${d.hostname}` : null].filter(Boolean).join(' · '))),
+    h('div', { class: 'spacer' }),
+    h('button', { class: 'icon-btn', 'aria-label': 'Закрыть', html: ICON.close, onclick: closeDrawer }));
+
+  const probeBtn = h('button', { class: 'btn primary', onclick: async () => {
+    probeBtn.disabled = true;
+    probeBtn.lastChild.textContent = 'Проверяю…';
+    try {
+      await api(`/api/devices/${encodeURIComponent(d.id)}/probe`, {});
+      await Promise.all([load(), loadDetail()]);
+      toast('Проверка выполнена');
+    } catch (e) {
+      toast(`Ошибка: ${e.message}`);
+      renderDrawer();
+    }
+  } }, h('span', { html: ICON.refresh }), h('span', {}, 'Проверить сейчас'));
+
+  const muteBtn = h('button', { class: 'btn' + (d.muted ? ' on' : ''), onclick: async () => {
+    await api(`/api/devices/${encodeURIComponent(d.id)}/mute`, { muted: !d.muted });
+    toast(d.muted ? 'Уведомления включены' : 'Уведомления по роутеру отключены');
+    await Promise.all([load(), loadDetail()]);
+  } }, h('span', { html: d.muted ? ICON.bellOff : ICON.bell }), d.muted ? 'Уведомления отключены' : 'Уведомления включены');
+
+  const actions = h('div', { class: 'actions' },
+    h('span', { class: `status-pill ${o}` }, OVERALL[o]),
+    h('div', { class: 'spacer' }), muteBtn, probeBtn);
+
+  const ranges = h('div', { class: 'segmented' }, [[24, '24 ч'], [168, '7 дней'], [720, '30 дней']].map(([hrs, label]) =>
+    h('button', { 'aria-pressed': String(state.hours === hrs), onclick: () => { state.hours = hrs; renderDrawer(); loadDetail(); } }, label)));
+
+  const checks = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Проверки'), ranges));
+  for (const name of CHECKS) {
+    const c = d.checks[name];
+    if (!c) continue;
+    const up = hist && hist.uptime[name];
+    const row = h('div', { class: 'check' },
+      badge(name, c),
+      h('div', { class: 'check-title' }, LABEL[name],
+        h('small', {}, c.status === 'na' ? 'не установлен' : `${STATUS[c.status]} ${c.since ? dur(now() - c.since) : ''}`)),
+      h('div', { class: 'check-side' },
+        up != null ? h('span', { 'data-tip': 'Доля успешных проверок за период' }, `${up}%`) : null,
+        h('button', {
+          class: 'bell' + (c.muted ? ' off' : ''), html: c.muted ? ICON.bellOff : ICON.bell,
+          'data-tip': c.muted ? 'Уведомления по этой проверке отключены' : 'Отключить уведомления по этой проверке',
+          'aria-label': 'Уведомления по проверке',
+          onclick: async () => {
+            await api(`/api/devices/${encodeURIComponent(d.id)}/mute`, { muted: !c.muted, check: name });
+            await Promise.all([load(), loadDetail()]);
+          },
+        })),
+      c.detail && c.status !== 'na' ? h('div', { class: 'check-detail' }, c.detail) : null,
+      hist && c.status !== 'na' ? strip(hist.strips[name], hist.start, hist.bucket) : null);
+    checks.append(row);
+  }
+
+  const system = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Система')),
+    h('dl', { class: 'facts' },
+      fact('Модель', info.model),
+      fact('OpenWrt', info.release),
+      fact('Аптайм', info.uptime != null ? dur(info.uptime) : null),
+      fact('Нагрузка', info.load),
+      fact('Память', info.mem_total ? `свободно ${size(info.mem_avail)} из ${size(info.mem_total)}` : null, usage(info.mem_total, info.mem_avail)),
+      fact('Накопитель', info.ovl_total ? `свободно ${size(info.ovl_avail)} из ${size(info.ovl_total)}` : null, usage(info.ovl_total, info.ovl_avail)),
+      fact('zapret', (info.zapret || []).join(', ') || 'не установлен'),
+      fact('forkop', info.forkop_version),
+      fact('Выход ChatGPT', info.gpt_loc),
+      fact('В сети tailscale', d.online ? 'сейчас' : ago(d.last_seen)),
+      fact('Данные получены', d.probe_ts ? ago(d.probe_ts) : null),
+      fact('Источник данных', info.source === 'agent' ? 'агент на роутере' : info.source === 'ssh' ? 'опрос по SSH с сервера' : null),
+    ));
+
+  const body = h('div', { class: 'drawer-body' }, actions, checks);
+  if (info.proxies && info.proxies.length) {
+    body.append(h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Прокси forkop')),
+      h('ul', { class: 'proxies' }, info.proxies.map((p) => h('li', {},
+        h('div', {}, h('div', {}, p.now || '—'), h('div', { class: 'p-group' }, p.name)),
+        h('div', { class: 'p-delay' }, p.delay ? `${p.delay} мс` : ''))))));
+  }
+  body.append(system);
+  if (d.agent_command) {
+    body.append(h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Агент на роутере'),
+      h('span', { class: `status-pill ${d.agent ? 'ok' : 'nodata'}` }, d.agent ? 'присылает данные' : 'не установлен или молчит')),
+      h('div', { class: 'agent' },
+        h('p', {}, 'Агент сам отправляет состояние роутера на дашборд по HTTPS и не зависит от tailscale. Чтобы установить или обновить, выполните команду в терминале роутера:'),
+        h('code', {}, d.agent_command),
+        h('button', { class: 'btn', onclick: async () => {
+          try {
+            await navigator.clipboard.writeText(d.agent_command);
+            toast('Команда скопирована');
+          } catch (_) {
+            toast('Не удалось скопировать — выделите текст вручную');
+          }
+        } }, 'Скопировать команду'))));
+  }
+  if (d.events) {
+    body.append(h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'События')),
+      h('ul', { class: 'events' }, d.events.length
+        ? d.events.map((e) => eventLine(e, false))
+        : h('li', {}, h('span', { class: 'what' }, h('span', {}, 'Сбоев не зафиксировано'))))));
+  }
+  drawer.replaceChildren(head, body);
+  body.scrollTop = keepScroll;
+}
+
+// ---- data loop ---------------------------------------------------------------
+
+async function load() {
+  try {
+    state.data = await api('/api/overview');
+    state.loadedAt = Date.now();
+    render();
+    if (state.openId && !state.detail) renderDrawer();
+  } catch (e) {
+    if (e.message === 'unauthorized') return;
+    $('live').className = 'live error';
+    $('live-text').textContent = 'Нет связи с сервером';
+  }
+}
+
+async function tick() {
+  if (document.hidden) return;
+  await load();
+  if (state.openId) await loadDetail();
+}
+
+// ---- wiring ------------------------------------------------------------------
+
+$('search').addEventListener('input', (e) => { state.search = e.target.value; if (state.data) { renderTable(state.data); } });
+$('scrim').addEventListener('click', closeDrawer);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+
+$('refresh').addEventListener('click', async () => {
+  $('refresh').classList.add('spin');
+  try {
+    await api('/api/refresh', {});
+    toast('Запущена проверка всех роутеров');
+    setTimeout(load, 1500);
+  } catch (e) {
+    toast(`Ошибка: ${e.message}`);
+  }
+  setTimeout(() => $('refresh').classList.remove('spin'), 1200);
+});
+
+$('theme').addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('theme', next); } catch (_) { /* private mode */ }
+});
+
+$('logout').addEventListener('click', async () => {
+  await api('/api/logout', {}).catch(() => {});
+  location.href = '/login';
+});
+
+const tip = $('tip');
+document.addEventListener('mouseover', (e) => {
+  const target = e.target.closest ? e.target.closest('[data-tip]') : null;
+  if (!target) {
+    tip.classList.remove('show');
+    return;
+  }
+  tip.textContent = target.dataset.tip;
+  tip.classList.add('show');
+  const r = target.getBoundingClientRect();
+  const t = tip.getBoundingClientRect();
+  let top = r.top - t.height - 8;
+  if (top < 8) top = r.bottom + 8;
+  tip.style.top = `${top}px`;
+  tip.style.left = `${Math.min(window.innerWidth - t.width - 8, Math.max(8, r.left + r.width / 2 - t.width / 2))}px`;
+});
+document.addEventListener('scroll', () => tip.classList.remove('show'), true);
+
+load();
+setInterval(tick, REFRESH_MS);
+setInterval(renderLive, 1000);

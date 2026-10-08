@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Вход · Мониторинг роутеров</title>
+  <link rel="icon" href="/static/favicon.svg">
+  <script src="/static/theme.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="login" id="form" autocomplete="on">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+      </div>
+      <h1>Мониторинг роутеров</h1>
+      <p>Войдите, чтобы увидеть состояние сети.</p>
+      <label>Логин
+        <input name="username" autocomplete="username" autocapitalize="none" required autofocus>
+      </label>
+      <label>Пароль
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <div class="err" id="err" role="alert"></div>
+      <button class="btn primary" type="submit" id="submit">Войти</button>
+    </form>
+  </div>
+  <script src="/static/login.js"></script>
+</body>
+</html>
