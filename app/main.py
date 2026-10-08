@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import alerts, bot, claude, collector, config, db, fixer
+from . import alerts, bot, claude, collector, config, db, fixer, updater
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 # httpx logs full request URLs at INFO, which would put the bot token in the journal
@@ -36,6 +36,7 @@ async def lifespan(app):
     tasks = []
     if config.COLLECTOR_ENABLED:
         fixer.recover()
+        updater.recover()
         tasks = [asyncio.create_task(collector.loop()), asyncio.create_task(alerts.sender_loop()),
                  asyncio.create_task(bot.loop())]
     else:
@@ -178,6 +179,7 @@ async def overview():
         "checks": collector.CHECKS,
         "devices": devices,
         "events": _events(db.q("SELECT * FROM events ORDER BY id DESC LIMIT 40")),
+        "forkop": updater.overview(),
         "claude": bool((await claude.auth_status()).get("loggedIn")) if config.COLLECTOR_ENABLED else False,
     }
 
@@ -192,6 +194,7 @@ async def device_detail(device_id: str, hours: int = 24):
     device["history"] = collector.device_history(device_id, hours)
     device["agent_command"] = collector.install_command(device_id)
     device["job"] = _job(fixer.for_device(device_id))
+    device["forkop_update"] = updater.last_for(device_id)
     device["events"] = _events(db.q("SELECT * FROM events WHERE device_id = ? ORDER BY id DESC LIMIT 50", (device_id,)))
     return device
 
@@ -248,6 +251,25 @@ async def job_action(job_id: int, action: str):
     if not done:
         raise HTTPException(409, "задача уже неактуальна")
     return {"ok": True}
+
+
+@app.post("/api/forkop/update", dependencies=[Depends(require_write)])
+async def forkop_update(request: Request):
+    """{"devices": [ids]} for chosen routers, {"devices": "all"} for every outdated one."""
+    body = await request.json()
+    devices = body.get("devices")
+    if devices != "all" and not (isinstance(devices, list) and devices):
+        raise HTTPException(400, "bad request")
+    flags = [f for f in updater.FLAGS if body.get(f)]
+    count, error = updater.start(None if devices == "all" else set(map(str, devices)), flags)
+    if error:
+        raise HTTPException(409, error)
+    return {"count": count}
+
+
+@app.post("/api/forkop/cancel", dependencies=[Depends(require_write)])
+async def forkop_cancel():
+    return {"skipped": updater.cancel()}
 
 
 @app.post("/api/refresh", dependencies=[Depends(require_write)])

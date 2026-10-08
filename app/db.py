@@ -103,6 +103,21 @@ CREATE TABLE IF NOT EXISTS notes (
     source TEXT,
     text TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS updates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    updated INTEGER,
+    batch INTEGER NOT NULL,
+    device_id TEXT NOT NULL,
+    name TEXT,
+    from_version TEXT,
+    to_version TEXT,
+    channel TEXT,
+    args TEXT,
+    stage TEXT NOT NULL,
+    log TEXT
+);
+CREATE INDEX IF NOT EXISTS updates_device ON updates (device_id, id);
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT

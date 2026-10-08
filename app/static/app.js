@@ -18,6 +18,7 @@ const ICON = {
   close: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
   external: svg('<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>'),
   wrench: svg('<path d="M14.5 6.5a4 4 0 0 0 5 5L21 13l-8.5 8.5a2.1 2.1 0 0 1-3-3L18 10"/><path d="M14.5 6.5L17 4a5 5 0 0 0-6.5 6.5L3 18a2.1 2.1 0 0 0 3 3l1.5-1.5"/>'),
+  update: svg('<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>'),
   refresh: svg('<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>'),
 };
 ICON[''] = ICON.na;
@@ -277,9 +278,45 @@ function renderLive() {
   $('banner').replaceChildren(d.error ? h('div', { class: 'banner' }, `Сборщик не смог выполнить проверку: ${d.error}`) : '');
 }
 
+// One button for the whole fleet: starts a staged rollout, shows its progress, stops it.
+function renderForkopAll(d) {
+  const f = d.forkop;
+  const box = $('forkop-all');
+  if (!f) return box.replaceChildren();
+  const online = new Set(d.devices.filter((x) => x.checks.reach && x.checks.reach.status === 'ok').map((x) => x.id));
+  const outdated = Object.entries(f.devices).filter(([id, p]) => p.outdated && online.has(id));
+  const c = f.rollout.counts;
+  if (f.rollout.active) {
+    const total = Object.values(c).reduce((a, b) => a + b, 0);
+    return box.replaceChildren(h('span', { class: 'chip' }, `forkop обновляется: ${(c.done || 0) + (c.failed || 0)} из ${total}`),
+      h('button', { class: 'btn', onclick: async () => {
+        await api('/api/forkop/cancel', {}).catch((e) => toast(`Ошибка: ${e.message}`));
+        toast('Остальные роутеры пропущены; текущий доделывается');
+        load();
+      } }, 'Остановить'));
+  }
+  box.replaceChildren(h('button', {
+    class: 'btn', disabled: !outdated.length,
+    'data-tip': outdated.length
+      ? `Последняя версия: ${f.latest.stable || '?'} (canary ${f.latest.canary || '?'}). Сначала обновится один роутер, затем остальные по два; при первой неудаче обновление остановится.`
+      : (f.latest.stable ? `На всех доступных роутерах уже последняя версия (${f.latest.stable})` : 'Не удалось узнать последнюю версию forkop'),
+    onclick: async () => {
+      if (!window.confirm(`Обновить forkop на ${outdated.length} роутерах? На время обновления интернет у людей за роутером может пропадать на минуту-две.`)) return;
+      try {
+        const r = await api('/api/forkop/update', { devices: 'all' });
+        toast(`Обновление запущено: роутеров ${r.count}`);
+        load();
+      } catch (e) {
+        toast(`Ошибка: ${e.message}`);
+      }
+    },
+  }, h('span', { html: ICON.update }), outdated.length ? `Обновить forkop у всех · ${outdated.length}` : 'forkop обновлён у всех'));
+}
+
 function render() {
   const d = state.data;
   if (!d) return;
+  renderForkopAll(d);
   renderTiles(d.devices);
   renderFilters(d.devices);
   renderTable(d);
@@ -317,7 +354,8 @@ async function loadDetail() {
       renderDrawer();
       // a running repair is followed closely, everything else at the normal pace
       clearTimeout(state.jobTimer);
-      if (detail.job && JOB_RUNNING.includes(detail.job.stage)) state.jobTimer = setTimeout(loadDetail, 4000);
+      const updating = detail.forkop_update && UPDATE_RUNNING.includes(detail.forkop_update.stage);
+      if ((detail.job && JOB_RUNNING.includes(detail.job.stage)) || updating) state.jobTimer = setTimeout(loadDetail, 4000);
     }
   } catch (e) {
     if (e.message !== 'unauthorized') toast(`Не удалось загрузить: ${e.message}`);
@@ -390,6 +428,43 @@ function jobCard(d) {
       `${STAGE[j.stage] || j.stage} · ${ago(j.updated || j.ts)}`)), box);
 }
 
+const UPDATE_STAGE = { queued: 'в очереди', running: 'обновляется', done: 'обновлён', failed: 'не удалось', skipped: 'пропущен' };
+const UPDATE_RUNNING = ['queued', 'running'];
+
+async function updateForkop(d, extra) {
+  try {
+    await api('/api/forkop/update', { devices: [d.id], ...extra });
+    toast('Обновление forkop запущено');
+    await Promise.all([load(), loadDetail()]);
+  } catch (e) {
+    toast(`Ошибка: ${e.message}`);
+  }
+}
+
+// The last forkop update of this router: versions, the installer's own output, retries.
+function updateCard(d) {
+  const u = d.forkop_update;
+  if (!u) return null;
+  const box = h('div', { class: 'job' },
+    h('p', {}, h('b', {}, `${u.from_version} → ${u.to_version}`), ` · канал ${u.channel}${u.args ? ` · ${u.args}` : ''}`));
+  if (u.log) box.append(h('pre', { class: 'log' }, u.log));
+  if (u.stage === 'failed') {
+    const buttons = h('div', { class: 'actions' });
+    if ((u.log || '').includes('--allow-low-space-tiny')) {
+      buttons.append(h('button', { class: 'btn', 'data-tip': 'На роутере мало места: установщик заменит sing-box на облегчённую сборку tiny',
+        onclick: () => updateForkop(d, { allow_tiny: true }) }, 'Повторить, разрешив sing-box tiny'));
+    }
+    if ((u.log || '').includes('--confirm-legacy-migration')) {
+      buttons.append(h('button', { class: 'btn', 'data-tip': 'Установщик удалит старую установку и перенесёт её настройки',
+        onclick: () => updateForkop(d, { confirm_legacy: true }) }, 'Повторить с переносом старой установки'));
+    }
+    if (buttons.children.length) box.append(buttons);
+  }
+  return h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Обновление forkop'),
+    h('span', { class: `status-pill ${u.stage === 'done' ? 'ok' : u.stage === 'failed' ? 'problem' : 'nodata'}` },
+      `${UPDATE_STAGE[u.stage] || u.stage} · ${ago(u.updated || u.ts)}`)), box);
+}
+
 function renderDrawer() {
   const drawer = $('drawer');
   const base = state.data && state.data.devices.find((x) => x.id === state.openId);
@@ -453,9 +528,21 @@ function renderDrawer() {
     },
   }, h('span', { html: ICON.wrench }), 'Исправить');
 
+  const fp = state.data.forkop && state.data.forkop.devices[d.id];
+  const updating = d.forkop_update && UPDATE_RUNNING.includes(d.forkop_update.stage);
+  const updateBtn = fp && h('button', {
+    class: 'btn', disabled: !fp.outdated || updating || working || o === 'offline' || o === 'nodata' || state.data.forkop.rollout.active,
+    'data-tip': fp.outdated
+      ? `Установщик из репозитория Screamshow/forkop: ${fp.current} → ${fp.target} (канал ${fp.channel}). Настройки сохраняются, при сбое установщик сам откатывает версию.`
+      : `Установлена ${fp.current}${fp.target ? ', это последняя версия канала ' + fp.channel : ''}`,
+    onclick: () => {
+      if (window.confirm(`Обновить forkop на ${d.name}: ${fp.current} → ${fp.target}? Интернет за роутером может пропасть на минуту-две.`)) updateForkop(d, {});
+    },
+  }, h('span', { html: ICON.update }), fp.outdated ? `Обновить forkop до ${fp.target}` : 'forkop обновлён');
+
   const actions = h('div', { class: 'actions' },
     h('span', { class: `status-pill ${o}` }, OVERALL[o]),
-    h('div', { class: 'spacer' }), fixBtn, luciBtn, muteBtn, probeBtn);
+    h('div', { class: 'spacer' }), fixBtn, updateBtn, luciBtn, muteBtn, probeBtn);
 
   const ranges = h('div', { class: 'segmented' }, [[24, '24 ч'], [168, '7 дней'], [720, '30 дней']].map(([hrs, label]) =>
     h('button', { 'aria-pressed': String(state.hours === hrs), onclick: () => { state.hours = hrs; renderDrawer(); loadDetail(); } }, label)));
@@ -501,7 +588,7 @@ function renderDrawer() {
       fact('Источник данных', info.source === 'agent' ? 'агент на роутере' : info.source === 'ssh' ? 'опрос по SSH с сервера' : null),
     ));
 
-  const body = h('div', { class: 'drawer-body' }, actions, jobCard(d), checks);
+  const body = h('div', { class: 'drawer-body' }, actions, jobCard(d), updateCard(d), checks);
   if (info.proxies && info.proxies.length) {
     body.append(h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Прокси forkop')),
       h('ul', { class: 'proxies' }, info.proxies.map((p) => h('li', {},
