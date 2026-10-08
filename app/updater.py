@@ -29,6 +29,16 @@ UPDATE_TIMEOUT = 25 * 60
 ACTIVE = ("queued", "running")
 # what the installer refuses to decide without a person; each is offered as an explicit retry
 FLAGS = {"allow_tiny": "--allow-low-space-tiny", "confirm_legacy": "--confirm-legacy-migration"}
+# A config file left behind by the long-removed legacy package makes the installer choose
+# "legacy migration", which replaces the current forkop settings with that old file. When
+# forkop is installed and the legacy package is not, the leftover is moved out of the way
+# (kept in /root) so the installer does a normal update.
+STALE_LEGACY = (
+    "if { opkg list-installed 2>/dev/null || apk list -I 2>/dev/null; } | grep -qE '^forkop[ -]' && "
+    "! { opkg list-installed 2>/dev/null || apk list -I 2>/dev/null; } | grep -qE '^podkop[-_]plus'; then "
+    "for f in /etc/config/podkop-plus /etc/config/podkop_plus; do "
+    "[ -f $f ] && mv $f /root/$(basename $f).stale; done; fi;"
+)
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 _latest = {"ts": 0, "stable": None, "canary": None, "error": None}
@@ -203,7 +213,7 @@ async def _update(update, script) -> bool:
     command = (f"sh {REMOTE}.sh --channel {update['channel']} {update['args'] or ''} >{REMOTE}.log 2>&1; "
                f"echo $? >{REMOTE}.rc")
     result, error = await collector.ssh_run(
-        dev, f"rm -f {REMOTE}.rc {REMOTE}.log; cat >{REMOTE}.sh && "
+        dev, f"rm -f {REMOTE}.rc {REMOTE}.log; {STALE_LEGACY} cat >{REMOTE}.sh && "
              f"{{ (trap '' HUP; exec sh -c '{command}') </dev/null >/dev/null 2>&1 & }}",
         60, input=script)
     if error or result.exit_status != 0:
@@ -231,19 +241,29 @@ async def _update(update, script) -> bool:
         _set(update["id"], stage="failed", log=tail + f"\n\nустановщик завершился с кодом {rc}; он сам возвращает прежнюю версию и настройки")
         return False
 
-    # the verdict is the probe's: the version changed and forkop works
-    await asyncio.sleep(25)
-    kv, error = await collector.ssh_probe(dev)
+    # The verdict is the probe's: the version changed and forkop works. After an update
+    # forkop needs a minute or two to rebuild its lists and start sing-box, so a stopped
+    # service is only a failure if it is still stopped after several probes.
+    error = status = detail = None
+    for attempt in range(8):
+        await asyncio.sleep(30)
+        _set(update["id"], log=tail + f"\n\nустановщик завершился, жду запуска forkop (проверка {attempt + 1} из 8)")
+        kv, error = await collector.ssh_probe(dev)
+        if error:
+            continue
+        checked, info = collector.evaluate(kv)
+        status, detail = checked["forkop"]
+        if status != "fail":
+            break
     if error:
         _set(update["id"], stage="failed", log=tail + f"\n\nустановщик завершился успешно, но проверить роутер не удалось: {error}")
         return False
-    checked, info = collector.evaluate(kv)
     downs, ups = collector._store(dev, checked, info, None, db.now())
     alerts.queue(downs, ups)
     version = info.get("forkop_version") or "?"
-    status, detail = checked["forkop"]
     if status == "fail":
-        _set(update["id"], stage="failed", to_version=version, log=tail + f"\n\nпосле обновления forkop не работает: {detail}")
+        _set(update["id"], stage="failed", to_version=version,
+             log=tail + f"\n\nчерез 4 минуты после обновления forkop не работает: {detail}")
         return False
     _set(update["id"], stage="done", to_version=version, log=tail)
     return True

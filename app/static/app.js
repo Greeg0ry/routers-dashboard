@@ -454,10 +454,7 @@ function updateCard(d) {
       buttons.append(h('button', { class: 'btn', 'data-tip': 'На роутере мало места: установщик заменит sing-box на облегчённую сборку tiny',
         onclick: () => updateForkop(d, { allow_tiny: true }) }, 'Повторить, разрешив sing-box tiny'));
     }
-    if ((u.log || '').includes('--confirm-legacy-migration')) {
-      buttons.append(h('button', { class: 'btn', 'data-tip': 'Установщик удалит старую установку и перенесёт её настройки',
-        onclick: () => updateForkop(d, { confirm_legacy: true }) }, 'Повторить с переносом старой установки'));
-    }
+    // No retry for "legacy migration": it replaces the current forkop settings with the old package's file.
     if (buttons.children.length) box.append(buttons);
   }
   return h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Обновление forkop'),
