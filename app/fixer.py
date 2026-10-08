@@ -64,16 +64,23 @@ ROUTE_SYSTEM = """\
 Если проблема не относится ни к одной проверке (другой сайт, скорость, Wi-Fi), оставь checks пустым и коротко \
 опиши проблему в problem.
 - intent "answer": вопрос или любое другое сообщение. Ответь сам в reply по данным таблицы: коротко, по-русски, \
-обычным текстом без разметки. Ничего не выдумывай: если данных в таблице нет, так и скажи.
+обычным текстом без разметки. Ничего не выдумывай: если данных в таблице и заметках нет, так и скажи.
+- intent "note": владелец просит что-то запомнить, сохранить или учитывать на будущее — ссылку на репозиторий, \
+источник пакетов, способ исправления, особенность роутера. В note запиши это одной самодостаточной заметкой: \
+все ссылки, имена и команды дословно, без «это» и «по ссылке выше». В reply коротко подтверди, что запомнил.
+- intent "forget": владелец просит забыть заметки. В forget перечисли их номера из списка заметок, в reply подтверди.
+Заметки хранятся в памяти бота и передаются моделям, которые ищут причину сбоев, — так что запоминать ты можешь.
 """
 ROUTE_SCHEMA = {
     "type": "object",
     "properties": {
-        "intent": {"type": "string", "enum": ["fix", "answer"]},
+        "intent": {"type": "string", "enum": ["fix", "answer", "note", "forget"]},
         "checks": {"type": "array", "items": {"type": "string", "enum": FIXABLE}},
         "devices": {"type": "array", "items": {"type": "string"}},
         "problem": {"type": "string"},
         "reply": {"type": "string"},
+        "note": {"type": "string"},
+        "forget": {"type": "array", "items": {"type": "integer"}},
     },
     "required": ["intent"],
 }
@@ -92,7 +99,9 @@ INVESTIGATE_SYSTEM = KNOWLEDGE + """
 Если с роутера это не исправить (лежит прокси-сервер, проблема у провайдера, нужен человек) — поставь \
 fixable=false, оставь steps пустым и объясни в diagnosis, что нужно сделать владельцу.
 diagnosis — 1–3 предложения для владельца: что сломано и почему. risk — насколько план может ухудшить \
-работу интернета у людей за роутером.
+работу интернета у людей за роутером. lesson — необязательно: один короткий факт об этом парке роутеров, который \
+сэкономит время при следующей поломке (где лежит нужный конфиг, какая команда на самом деле работает, типичная \
+причина). Не пересказ плана; оставь пустым, если ничего такого не выяснилось.
 """
 PLAN_SCHEMA = {
     "type": "object",
@@ -105,6 +114,7 @@ PLAN_SCHEMA = {
             "required": ["command", "why"],
         }},
         "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+        "lesson": {"type": "string"},
     },
     "required": ["diagnosis", "fixable", "steps", "risk"],
 }
@@ -207,6 +217,42 @@ def _spawn(job_id, coro):
         finally:
             _tasks.pop(job_id, None)
     _tasks[job_id] = asyncio.get_running_loop().create_task(guarded())
+
+
+# --- notes -------------------------------------------------------------------------
+# What the owner asked to remember (repositories, package sources, how something is
+# fixed here) and short lessons from repairs that worked. They go into the prompts.
+
+NOTES_LIMIT = 40
+NOTE_CHARS = 700
+
+
+def notes():
+    return db.q("SELECT * FROM notes ORDER BY id")
+
+
+def add_note(text, source="owner"):
+    text = " ".join(str(text).split())[:NOTE_CHARS]
+    if not text or db.one("SELECT 1 FROM notes WHERE text = ?", (text,)):
+        return None
+    note_id = db.x("INSERT INTO notes (ts, source, text) VALUES (?,?,?)", (db.now(), source, text)).lastrowid
+    # the oldest automatic lessons make room; the owner's own notes are never dropped
+    extra = db.one("SELECT COUNT(*) AS n FROM notes")["n"] - NOTES_LIMIT
+    if extra > 0:
+        db.x("DELETE FROM notes WHERE id IN (SELECT id FROM notes WHERE source = 'auto' ORDER BY id LIMIT ?)", (extra,))
+    return note_id
+
+
+def forget(ids):
+    return sum(db.x("DELETE FROM notes WHERE id = ?", (int(i),)).rowcount for i in ids)
+
+
+def _notes_block():
+    rows = notes()
+    if not rows:
+        return ""
+    return "Заметки (сохранены владельцем и по итогам прошлых исправлений, учитывай их):\n" + "\n".join(
+        f"#{r['id']} {r['text']}" for r in rows) + "\n\n"
 
 
 # --- fleet -------------------------------------------------------------------------
@@ -316,9 +362,17 @@ async def _route(job_id, text):
     fleet = _fleet()
     table = "\n".join(_describe(dev, checks) for dev, checks in fleet)
     answer, usage = await claude.run(
-        f"Роутеры:\n{table}\n\nСообщение владельца:\n{text}", model=config.MODEL_ROUTE,
+        f"{_notes_block()}Роутеры:\n{table}\n\nСообщение владельца:\n{text}", model=config.MODEL_ROUTE,
         system=ROUTE_SYSTEM, schema=ROUTE_SCHEMA, timeout=180)
     _add_usage(job_id, "route", config.MODEL_ROUTE, usage)
+    if answer.get("intent") == "note":
+        saved = add_note(answer.get("note") or text)
+        _save(job_id, stage="done", reply=(answer.get("reply") or "Запомнил.") + (f" (заметка #{saved})" if saved else ""))
+        return
+    if answer.get("intent") == "forget":
+        count = forget(answer.get("forget") or [])
+        _save(job_id, stage="done", reply=f"Удалено заметок: {count}." if count else "Таких заметок нет. Список — /notes")
+        return
     if answer.get("intent") != "fix":
         _save(job_id, stage="done", reply=answer.get("reply") or "Не понял запрос.")
         return
@@ -370,7 +424,7 @@ async def _plan(job_id, targets, problem=None, tried=None):
             return
         reps = group["devices"][:REPRESENTATIVES]
         lines = [_describe(*fleet[d["id"]]) for d in group["devices"]]
-        prompt = (f"Запрос владельца: {request}\n"
+        prompt = (_notes_block() + f"Запрос владельца: {request}\n"
                   + (f"Проблема: {problem}\n" if problem else "")
                   + (f"Не проходят проверки: {', '.join(group['checks'])}\n" if group["checks"] else "")
                   + f"Роутеры группы ({len(lines)}):\n" + "\n".join(lines)
@@ -388,6 +442,7 @@ async def _plan(job_id, targets, problem=None, tried=None):
             path.unlink(missing_ok=True)
         _add_usage(job_id, "investigate", config.MODEL_INVESTIGATE, usage)
         group.update(diagnosis=str(answer["diagnosis"]), risk=answer.get("risk", "medium"), cached=False,
+                     lesson=str(answer.get("lesson") or "").strip(),
                      steps=[{"command": str(s["command"]), "why": str(s.get("why", ""))} for s in answer["steps"]][:8])
         group["fixable"] = bool(answer["fixable"]) and bool(group["steps"])
 
@@ -478,6 +533,8 @@ async def _execute(job_id):
         fail = len(judged) - ok
         if not judged or (not group.get("cached") and not ok):
             continue  # an unproven plan never replaces a stored one
+        if ok and group.get("lesson"):
+            add_note(group["lesson"], source="auto")  # only a plan that worked teaches anything
         stored = {k: group[k] for k in ("diagnosis", "steps", "risk", "fixable")}
         score = "ok + excluded.ok, fail = fail + excluded.fail" if group.get("cached") else "excluded.ok, fail = excluded.fail"
         db.x("INSERT INTO playbooks (signature, plan, ok, fail, updated) VALUES (?,?,?,?,?) "

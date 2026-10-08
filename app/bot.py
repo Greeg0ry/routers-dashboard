@@ -19,6 +19,8 @@ HELP = (
     "Я найду причину, покажу план и выполню его после вашего подтверждения.\n\n"
     "/login — войти в Claude по подписке\n"
     "/status — состояние Claude и роутеров\n"
+    "Могу запоминать: <i>запомни, что zapret2 ставится из репозитория …</i> — заметки учитываются при поиске причин.\n\n"
+    "/notes — мои заметки, /forget 3 — удалить заметку\n"
     "/cancel — отменить текущие задачи\n"
     "/logout — выйти из Claude"
 )
@@ -227,6 +229,13 @@ async def on_message(msg):
     elif command == "/logout":
         await claude.logout()
         await say("Вышел из Claude.")
+    elif command == "/notes":
+        rows = fixer.notes()
+        await say("\n\n".join(f"<b>#{r['id']}</b>{' · из исправления' if r['source'] == 'auto' else ''}\n{e(r['text'])}" for r in rows)
+                  if rows else "Заметок пока нет. Напишите, что запомнить, обычным текстом.")
+    elif command == "/forget":
+        ids = [int(x.lstrip("#")) for x in text.split()[1:] if x.lstrip("#").isdigit()]
+        await say(f"Удалено заметок: {fixer.forget(ids)}." if ids else "Укажите номер: /forget 3")
     elif command == "/status":
         await say(await status_text())
     elif command == "/cancel":
@@ -272,6 +281,7 @@ async def loop():
     await call("setMyCommands", commands=[
         {"command": "status", "description": "Состояние Claude и роутеров"},
         {"command": "login", "description": "Войти в Claude по подписке"},
+        {"command": "notes", "description": "Мои заметки"},
         {"command": "cancel", "description": "Отменить текущие задачи"},
         {"command": "help", "description": "Что я умею"},
     ])
