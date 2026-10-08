@@ -29,7 +29,10 @@ FORBIDDEN = re.compile("|".join([
     r"authorized_keys", r"\brm\s+(-\w+\s+)*-\w*[rR]\w*\s+(-\w+\s+)*(?!/tmp/)",
     r"tailscale\s+(down|logout|set|up)", r"(tailscale|dropbear|network|firewall|uhttpd|cron)\s+(stop|disable|restart|reload)",
     r"\buci\b.*\b(dropbear|tailscale|network|wireless|firewall)\b", r"\b(ifdown|ifup|wifi)\b",
-    r"\b(apk\s+del|opkg\s+remove)\b", r"rmon", r"(zapret2?|forkop|sing-box)\s+disable",
+    # packages may be removed (as an approved plan step), except the ones that keep the router reachable and booting
+    r"\b(apk\s+del|opkg\s+remove)\b[^;|&]*\b(tailscale\w*|dropbear|openssh\S*|busybox|base-files|netifd|procd|ubus\w*|uci|libc|musl"
+    r"|kernel|kmod-\S+|firewall4?|nftables\S*|dnsmasq\S*|odhcp\S+|apk\S*|opkg|curl|libcurl\S*|ca-bundle|ca-certificates|uhttpd\S*|luci(?:-(?:base|ssl|light|nginx|mod-\S+|lib-\S+|theme-\S+))?(?![\w-])|wpad\S*|hostapd\S*)",
+    r"rmon", r"(zapret2?|forkop|sing-box)\s+disable",
     r"(curl|wget)[^|;&]*\|\s*(ba)?sh",
 ]), re.I)
 
@@ -194,7 +197,7 @@ async def router_run(device: str, command: str, timeout: int = 60) -> str:
         return "Лимит вызовов исчерпан. Заверши работу и выдай итог по тому, что уже известно."
     if FORBIDDEN.search(command):
         _log(device, command, None, "refused: forbidden")
-        return "Отказано: команда из запрещённого списка (перезагрузка, прошивка, сеть, SSH, tailscale, удаление пакетов)."
+        return "Отказано: команда из запрещённого списка (перезагрузка, прошивка, сеть, SSH, tailscale, удаление системных пакетов)."
     if " ".join(command.split()) not in PLAN:
         reason = not_read_only(command)
         if reason:

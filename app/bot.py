@@ -29,7 +29,9 @@ _login_timer: asyncio.Task | None = None
 
 async def call(method, http_timeout=20, **payload):
     try:
-        r = await _client.post(API + method, json=payload, timeout=http_timeout)
+        # Telegram rejects explicit nulls ("object expected as reply markup")
+        body = {k: v for k, v in payload.items() if v is not None}
+        r = await _client.post(API + method, json=body, timeout=http_timeout)
         data = r.json()
     except (httpx.HTTPError, ValueError) as e:
         log.warning("telegram %s failed: %s", method, type(e).__name__)
@@ -204,8 +206,8 @@ async def status_text():
              f"Модели: разбор {config.MODEL_ROUTE}, исследование {config.MODEL_INVESTIGATE}, выполнение {config.MODEL_EXECUTE}"]
     devices = db.one("SELECT COUNT(*) AS n FROM devices WHERE present = 1")["n"]
     lines.append(f"Роутеров: {devices}")
-    for row in db.q("SELECT name, COUNT(*) AS n FROM checks c JOIN devices d ON d.id = c.device_id "
-                    "WHERE c.down = 1 AND d.present = 1 GROUP BY name ORDER BY n DESC"):
+    for row in db.q("SELECT c.name AS name, COUNT(*) AS n FROM checks c JOIN devices d ON d.id = c.device_id "
+                    "WHERE c.down = 1 AND d.present = 1 GROUP BY c.name ORDER BY n DESC"):
         lines.append(f"🔴 {alerts.LABEL.get(row['name'], row['name'])}: {row['n']}")
     active = db.one("SELECT COUNT(*) AS n FROM jobs WHERE stage IN ('routing','investigating','awaiting','executing')")["n"]
     if active:
