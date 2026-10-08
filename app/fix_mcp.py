@@ -135,6 +135,7 @@ SUB = {
     "service": lambda a: a[1:2] == ["status"],
     "sing-box": lambda a: a[:1] == ["version"],
     "command": lambda a: a[:1] == ["-v"],
+    "sysctl": lambda a: not any(x.startswith("-w") or x == "-p" or "=" in x for x in a),
     "logread": lambda a: "-f" not in a,
     "top": lambda a: any(x.startswith("-") and "b" in x for x in a),
     "find": lambda a: not {"-delete", "-exec", "-ok", "-execdir", "-fprint"} & set(a),

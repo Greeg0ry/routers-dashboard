@@ -200,6 +200,28 @@ def _report(batch):
     db.x("INSERT INTO outbox (ts, text) VALUES (?, ?)", (db.now(), text[:3900]))
 
 
+# install.sh calls "apk add --force-reinstall" for both the install and its own rollback.
+# apk-tools 3.0.2 (OpenWrt 25.12.0) does not know the option: the install fails, the
+# rollback fails the same way and forkop is left stopped. Such a router is not touched.
+APK_CHECK = ("command -v apk >/dev/null && apk add --force-reinstall --simulate 2>&1 | grep -q 'unrecognized option' "
+             "&& echo APK_TOO_OLD $(apk --version | cut -d, -f1); true")
+# What a failed installer can leave behind when its rollback did not finish.
+REVIVE = ("forkop get_status 2>/dev/null | grep -q '\"running\": 1' || "
+          "{ /etc/init.d/forkop enable; /etc/init.d/forkop start >/dev/null 2>&1; echo REVIVED; }")
+
+
+async def _revive(dev, was_running):
+    """After a failed update: start forkop again if it worked before and is stopped now."""
+    if not was_running:
+        return ""
+    result, error = await collector.ssh_run(dev, REVIVE, 120)
+    if error:
+        return f"\n\nне удалось проверить, работает ли forkop после сбоя: {error}"
+    if "REVIVED" in str(result.stdout):
+        return "\n\nпосле сбоя forkop был остановлен — запущен заново на прежней версии"
+    return ""
+
+
 async def _update(update, script) -> bool:
     """One router. True when the new version is installed and forkop works."""
     dev = db.one("SELECT * FROM devices WHERE id = ?", (update["device_id"],))
@@ -207,7 +229,21 @@ async def _update(update, script) -> bool:
         _set(update["id"], stage="failed", log="роутер пропал из списка")
         return False
     dev = dict(dev)
-    _set(update["id"], stage="running", log="передаю установщик")
+    _set(update["id"], stage="running", log="проверяю роутер")
+    before = db.one("SELECT status FROM checks WHERE device_id = ? AND name = 'forkop'", (dev["id"],))
+    was_running = bool(before) and before["status"] == "ok"
+    result, error = await collector.ssh_run(dev, APK_CHECK, 40)
+    if error:
+        _set(update["id"], stage="failed", log=f"роутер не отвечает по SSH: {error}")
+        return False
+    if "APK_TOO_OLD" in str(result.stdout):
+        version = str(result.stdout).replace("APK_TOO_OLD", "").strip()
+        _set(update["id"], stage="failed", log=(
+            f"Обновление не запускалось, на роутере ничего не изменено. Установщику forkop нужна опция apk "
+            f"--force-reinstall, а в {version or 'apk этой прошивки'} её нет: установка упала бы, откат тоже, "
+            "и forkop остался бы остановлен. Сначала нужно обновить прошивку роутера (или пакет apk)."))
+        return False
+    _set(update["id"], log="передаю установщик")
     # Detached from the SSH session: the update restarts networking pieces, and a
     # dropped connection must not kill the installer half-way.
     command = (f"sh {REMOTE}.sh --channel {update['channel']} {update['args'] or ''} >{REMOTE}.log 2>&1; "
@@ -238,7 +274,8 @@ async def _update(update, script) -> bool:
         _set(update["id"], stage="failed", log=(tail + "\n\nне дождался завершения установщика").strip())
         return False
     if rc != 0:
-        _set(update["id"], stage="failed", log=tail + f"\n\nустановщик завершился с кодом {rc}; он сам возвращает прежнюю версию и настройки")
+        note = await _revive(dev, was_running)
+        _set(update["id"], stage="failed", log=tail + f"\n\nустановщик завершился с кодом {rc}; прежнюю версию и настройки он возвращает сам" + note)
         return False
 
     # The verdict is the probe's: the version changed and forkop works. After an update
