@@ -44,3 +44,17 @@ PUSH_FRESH_SECONDS = int(os.environ.get("PUSH_FRESH_SECONDS", "330"))
 
 # Tailnet device names (first DNS label) that are not monitored.
 EXCLUDE = set(os.environ.get("EXCLUDE", "").split())
+
+# Repairs. Claude Code runs on this server under a Claude subscription (login through
+# the Telegram bot). Each stage has its own model: a cheap one reads the request, a
+# strong one investigates, a cheap one carries out the approved plan.
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", str(Path.home() / ".local/bin/claude"))
+MODEL_ROUTE = os.environ.get("MODEL_ROUTE", "haiku")
+MODEL_INVESTIGATE = os.environ.get("MODEL_INVESTIGATE", "opus")
+MODEL_EXECUTE = os.environ.get("MODEL_EXECUTE", "haiku")
+EFFORT_INVESTIGATE = os.environ.get("EFFORT_INVESTIGATE", "medium")
+# 1 = carry out the plan without waiting for the confirmation button
+FIX_AUTO_APPLY = os.environ.get("FIX_AUTO_APPLY", "0") == "1"
+FIX_CONCURRENCY = int(os.environ.get("FIX_CONCURRENCY", "3"))
+# A plan that fixed a symptom is reused for the same symptom without a new investigation.
+PLAYBOOK_DAYS = int(os.environ.get("PLAYBOOK_DAYS", "30"))

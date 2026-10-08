@@ -63,6 +63,44 @@ CREATE TABLE IF NOT EXISTS outbox (
     ts INTEGER NOT NULL,
     text TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    updated INTEGER,
+    source TEXT,
+    request TEXT,
+    stage TEXT NOT NULL,
+    error TEXT,
+    reply TEXT,
+    targets TEXT DEFAULT '[]',
+    plan TEXT DEFAULT '[]',
+    results TEXT DEFAULT '[]',
+    usage TEXT DEFAULT '{}',
+    tried TEXT,
+    msg_id INTEGER
+);
+CREATE TABLE IF NOT EXISTS job_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    job_id INTEGER NOT NULL,
+    device TEXT,
+    mode TEXT,
+    command TEXT,
+    exit_code INTEGER,
+    output TEXT
+);
+CREATE INDEX IF NOT EXISTS job_log_job ON job_log (job_id);
+CREATE TABLE IF NOT EXISTS playbooks (
+    signature TEXT PRIMARY KEY,
+    plan TEXT NOT NULL,
+    ok INTEGER DEFAULT 0,
+    fail INTEGER DEFAULT 0,
+    updated INTEGER
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 with _lock:
     _conn.executescript(SCHEMA)

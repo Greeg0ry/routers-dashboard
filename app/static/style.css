@@ -255,6 +255,13 @@ a.btn { color: inherit; text-decoration: none; }
 .drawer .events li { padding: 9px 16px; }
 .drawer .events .when { width: 84px; }
 
+.job { padding: 10px 16px 16px; display: flex; flex-direction: column; gap: 10px; font-size: 13.5px; }
+.job p { margin: 0; }
+.job ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }
+.job code { display: block; padding: 6px 8px; border-radius: 8px; background: var(--surface-2); font-size: 12.5px; overflow-wrap: anywhere; }
+.job small, .job-note { display: block; color: var(--ink-2); font-size: 12.5px; }
+.job-ok b { color: var(--good-ink); }
+.job-bad, .job-bad b { color: var(--bad-ink); }
 .agent { padding: 10px 16px 16px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
 .agent p { margin: 0; color: var(--ink-2); font-size: 13px; }
 .agent code {

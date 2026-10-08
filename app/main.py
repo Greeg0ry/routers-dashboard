@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import alerts, collector, config, db
+from . import alerts, bot, claude, collector, config, db, fixer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 # httpx logs full request URLs at INFO, which would put the bot token in the journal
@@ -35,7 +35,9 @@ if not config.SESSION_SECRET or not config.ADMIN_PASSWORD_HASH:
 async def lifespan(app):
     tasks = []
     if config.COLLECTOR_ENABLED:
-        tasks = [asyncio.create_task(collector.loop()), asyncio.create_task(alerts.sender_loop())]
+        fixer.recover()
+        tasks = [asyncio.create_task(collector.loop()), asyncio.create_task(alerts.sender_loop()),
+                 asyncio.create_task(bot.loop())]
     else:
         collector.state["history"] = collector.overview_history()
         collector.state["last_cycle"] = (db.one("SELECT MAX(ts) AS ts FROM samples")["ts"] or 0)
@@ -176,6 +178,7 @@ async def overview():
         "checks": collector.CHECKS,
         "devices": devices,
         "events": _events(db.q("SELECT * FROM events ORDER BY id DESC LIMIT 40")),
+        "claude": bool((await claude.auth_status()).get("loggedIn")) if config.COLLECTOR_ENABLED else False,
     }
 
 
@@ -188,6 +191,7 @@ async def device_detail(device_id: str, hours: int = 24):
     device = _device(row, db.q("SELECT * FROM checks WHERE device_id = ?", (device_id,)))
     device["history"] = collector.device_history(device_id, hours)
     device["agent_command"] = collector.install_command(device_id)
+    device["job"] = _job(fixer.for_device(device_id))
     device["events"] = _events(db.q("SELECT * FROM events WHERE device_id = ? ORDER BY id DESC LIMIT 50", (device_id,)))
     return device
 
@@ -210,6 +214,39 @@ async def mute(device_id: str, request: Request):
 async def probe(device_id: str):
     if not await collector.probe_now(device_id):
         raise HTTPException(404, "not found")
+    return {"ok": True}
+
+
+# --- repairs -------------------------------------------------------------------
+
+def _job(job):
+    if not job:
+        return None
+    return {k: job[k] for k in ("id", "ts", "updated", "stage", "request", "error", "plan", "results", "usage")}
+
+
+@app.post("/api/devices/{device_id}/fix", dependencies=[Depends(require_write)])
+async def fix(device_id: str):
+    if not (await claude.auth_status()).get("loggedIn"):
+        raise HTTPException(409, "Claude не авторизован: отправьте боту /login")
+    job_id, error = fixer.submit_device(device_id)
+    if error:
+        raise HTTPException(409, error)
+    return {"job": job_id}
+
+
+@app.post("/api/jobs/{job_id}/{action}", dependencies=[Depends(require_write)])
+async def job_action(job_id: int, action: str):
+    if action == "confirm":
+        done = fixer.confirm(job_id)
+    elif action == "cancel":
+        done = fixer.cancel(job_id)
+    elif action == "deepen":
+        done = fixer.get(job_id) is not None and fixer.deepen(job_id) is not None
+    else:
+        raise HTTPException(404, "not found")
+    if not done:
+        raise HTTPException(409, "задача уже неактуальна")
     return {"ok": True}
 
 

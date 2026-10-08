@@ -17,6 +17,7 @@ const ICON = {
   bellOff: svg('<path d="M8.6 4.1A6 6 0 0 1 18 9c0 2.3.4 3.9.9 5M6.3 7.2A6 6 0 0 0 6 9c0 6-2.5 7-2.5 7H16"/><path d="M10 20a2 2 0 0 0 4 0"/><path d="M3 3l18 18"/>'),
   close: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
   external: svg('<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>'),
+  wrench: svg('<path d="M14.5 6.5a4 4 0 0 0 5 5L21 13l-8.5 8.5a2.1 2.1 0 0 1-3-3L18 10"/><path d="M14.5 6.5L17 4a5 5 0 0 0-6.5 6.5L3 18a2.1 2.1 0 0 0 3 3l1.5-1.5"/>'),
   refresh: svg('<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>'),
 };
 ICON[''] = ICON.na;
@@ -299,6 +300,7 @@ async function openDrawer(id) {
 }
 
 function closeDrawer() {
+  clearTimeout(state.jobTimer);
   state.openId = null;
   $('drawer').classList.remove('open');
   $('scrim').classList.remove('open');
@@ -313,6 +315,9 @@ async function loadDetail() {
     if (state.openId === id) {
       state.detail = detail;
       renderDrawer();
+      // a running repair is followed closely, everything else at the normal pace
+      clearTimeout(state.jobTimer);
+      if (detail.job && JOB_RUNNING.includes(detail.job.stage)) state.jobTimer = setTimeout(loadDetail, 4000);
     }
   } catch (e) {
     if (e.message !== 'unauthorized') toast(`Не удалось загрузить: ${e.message}`);
@@ -329,6 +334,60 @@ function usage(total, avail) {
   const i = h('i', { class: used > 0.9 ? 'm-fail' : used > 0.75 ? 'm-warn' : 'm-accent' });
   i.style.width = `${Math.round(used * 100)}%`;
   return h('div', { class: 'meter' }, i);
+}
+
+const STAGE = {
+  routing: 'разбираю запрос', investigating: 'ищу причину', awaiting: 'ждёт подтверждения', executing: 'выполняю',
+  done: 'готово', failed: 'ошибка', cancelled: 'отменено',
+};
+const JOB_RUNNING = ['routing', 'investigating', 'executing'];
+
+// The latest repair job for this router: diagnosis, plan to approve, result.
+function jobCard(d) {
+  const j = d.job;
+  if (!j) return null;
+  const act = async (action, done) => {
+    try {
+      await api(`/api/jobs/${j.id}/${action}`, {});
+      toast(done);
+      await loadDetail();
+    } catch (e) {
+      toast(`Ошибка: ${e.message}`);
+    }
+  };
+  const mine = j.results.filter((r) => r.id === d.id);
+  const failed = j.stage === 'failed' || mine.some((r) => !r.ok);
+  const box = h('div', { class: 'job' });
+  for (const g of j.plan.filter((x) => x.devices.some((dev) => dev.id === d.id))) {
+    box.append(h('p', {}, h('b', {}, g.checks.map((c) => LABEL[c]).join(', ') || 'Проблема'), ` — ${g.diagnosis || ''}`));
+    if (!g.fixable) box.append(h('p', { class: 'job-note' }, 'С роутера это не исправить.'));
+    else if (!mine.length) {
+      box.append(h('ol', {}, g.steps.map((s) => h('li', {}, h('code', {}, s.command), h('small', {}, s.why)))));
+      if (g.cached) box.append(h('p', { class: 'job-note' }, 'План взят из сохранённых решений — он уже помогал при таком же сбое.'));
+    }
+  }
+  for (const r of mine) {
+    box.append(h('p', { class: r.ok ? 'job-ok' : 'job-bad' },
+      h('b', {}, r.ok ? 'Исправлено' : 'Не исправлено'),
+      r.summary ? ` — ${r.summary}` : '', r.verdict ? ` Проба: ${r.verdict}.` : ''));
+  }
+  if (j.error) box.append(h('p', { class: 'job-bad' }, j.error));
+  const others = new Set(j.plan.flatMap((g) => g.devices.map((dev) => dev.id))).size - 1;
+  const buttons = h('div', { class: 'actions' });
+  if (j.stage === 'awaiting') {
+    buttons.append(
+      h('button', { class: 'btn primary', onclick: () => act('confirm', 'Выполняю план') },
+        others > 0 ? `Выполнить на ${others + 1} роутерах` : 'Выполнить'),
+      h('button', { class: 'btn', onclick: () => act('cancel', 'Отменено') }, 'Отмена'));
+  } else if (JOB_RUNNING.includes(j.stage)) {
+    buttons.append(h('button', { class: 'btn', onclick: () => act('cancel', 'Отменено') }, 'Отменить'));
+  } else if (j.stage === 'done' && mine.some((r) => !r.ok)) {
+    buttons.append(h('button', { class: 'btn', onclick: () => act('deepen', 'Исследую заново') }, 'Разобраться глубже'));
+  }
+  if (buttons.children.length) box.append(buttons);
+  return h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Исправление'),
+    h('span', { class: `status-pill ${failed ? 'problem' : j.stage === 'done' ? 'ok' : 'nodata'}` },
+      `${STAGE[j.stage] || j.stage} · ${ago(j.updated || j.ts)}`)), box);
 }
 
 function renderDrawer() {
@@ -375,9 +434,28 @@ function renderDrawer() {
     'data-tip': 'Веб-интерфейс роутера через дашборд, без подключения к tailscale',
   }, h('span', { html: ICON.external }), 'LuCI');
 
+  const broken = o !== 'offline' && o !== 'nodata' && CHECKS.some((k) => d.checks[k] && d.checks[k].status === 'fail');
+  const working = d.job && [...JOB_RUNNING, 'awaiting'].includes(d.job.stage);
+  const fixBtn = broken && h('button', {
+    class: 'btn', disabled: working || !state.data.claude,
+    'data-tip': !state.data.claude ? 'Claude не авторизован: отправьте боту команду /login'
+      : 'Claude найдёт причину сбоя и предложит план исправления',
+    onclick: async () => {
+      fixBtn.disabled = true;
+      try {
+        await api(`/api/devices/${encodeURIComponent(d.id)}/fix`, {});
+        toast('Claude ищет причину — план появится здесь и в Telegram');
+        await loadDetail();
+      } catch (e) {
+        toast(`Ошибка: ${e.message}`);
+        renderDrawer();
+      }
+    },
+  }, h('span', { html: ICON.wrench }), 'Исправить');
+
   const actions = h('div', { class: 'actions' },
     h('span', { class: `status-pill ${o}` }, OVERALL[o]),
-    h('div', { class: 'spacer' }), luciBtn, muteBtn, probeBtn);
+    h('div', { class: 'spacer' }), fixBtn, luciBtn, muteBtn, probeBtn);
 
   const ranges = h('div', { class: 'segmented' }, [[24, '24 ч'], [168, '7 дней'], [720, '30 дней']].map(([hrs, label]) =>
     h('button', { 'aria-pressed': String(state.hours === hrs), onclick: () => { state.hours = hrs; renderDrawer(); loadDetail(); } }, label)));
@@ -423,7 +501,7 @@ function renderDrawer() {
       fact('Источник данных', info.source === 'agent' ? 'агент на роутере' : info.source === 'ssh' ? 'опрос по SSH с сервера' : null),
     ));
 
-  const body = h('div', { class: 'drawer-body' }, actions, checks);
+  const body = h('div', { class: 'drawer-body' }, actions, jobCard(d), checks);
   if (info.proxies && info.proxies.length) {
     body.append(h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Прокси forkop')),
       h('ul', { class: 'proxies' }, info.proxies.map((p) => h('li', {},

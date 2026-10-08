@@ -90,8 +90,8 @@ def _parse_kv(text):
     return kv
 
 
-async def ssh_probe(dev):
-    """Returns (kv, error). error is None, "auth", or a short description."""
+async def ssh_run(dev, command, timeout, input=None):
+    """Runs a command on the router. Returns (result, error); error is None, "auth", or a short description."""
     key = [config.SSH_KEY] if os.path.exists(config.SSH_KEY) else None
     passwords = list(config.SSH_PASSWORDS)
     known = _good_password.get(dev["id"])
@@ -104,13 +104,10 @@ async def ssh_probe(dev):
                 dev["ip"], username=config.SSH_USER, password=password, client_keys=key,
                 known_hosts=None, agent_path=None, connect_timeout=15, login_timeout=25,
             ) as conn:
-                result = await conn.run("sh -s", input=PROBE, timeout=config.PROBE_TIMEOUT, check=False)
+                result = await conn.run(command, input=input, timeout=timeout, check=False)
                 if password:
                     _good_password[dev["id"]] = password
-                kv = _parse_kv(str(result.stdout or ""))
-                if not kv:
-                    return None, "пустой ответ роутера"
-                return kv, None
+                return result, None
         except asyncssh.PermissionDenied:
             continue
         except (asyncio.TimeoutError, TimeoutError):
@@ -120,6 +117,17 @@ async def ssh_probe(dev):
         except (OSError, asyncssh.Error) as e:
             return None, (str(e) or type(e).__name__)[:80]
     return None, "auth"
+
+
+async def ssh_probe(dev):
+    """Returns (kv, error). error is None, "auth", or a short description."""
+    result, error = await ssh_run(dev, "sh -s", config.PROBE_TIMEOUT, input=PROBE)
+    if error:
+        return None, error
+    kv = _parse_kv(str(result.stdout or ""))
+    if not kv:
+        return None, "пустой ответ роутера"
+    return kv, None
 
 
 # --- evaluation ----------------------------------------------------------------
