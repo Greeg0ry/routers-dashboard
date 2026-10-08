@@ -23,18 +23,40 @@ OUTPUT_LIMIT = 5000
 calls = 0
 
 # Refused even when the owner approved the plan: these can cut the router off from its owner or from us.
-FORBIDDEN = re.compile("|".join([
-    r"\breboot\b", r"\bpoweroff\b", r"\bhalt\b", r"\bsysupgrade\b", r"\bfirstboot\b", r"\bjffs2reset\b",
-    r"factory[-_ ]?reset", r"\bmkfs", r"\bdd\s+(if|of)=", r"\bmtd\b", r"\bpasswd\b", r"/etc/shadow",
-    r"authorized_keys", r"\brm\s+(-\w+\s+)*-\w*[rR]\w*\s+(-\w+\s+)*(?!/tmp/)",
-    r"tailscale\s+(down|logout|set|up)", r"(tailscale|dropbear|network|firewall|uhttpd|cron)\s+(stop|disable|restart|reload)",
-    r"\buci\b.*\b(dropbear|tailscale|network|wireless|firewall)\b", r"\b(ifdown|ifup|wifi)\b",
+_END = r"(?=\s|;|&|\||$)"
+_RM_TARGET = "|".join([
+    r"[^\s;|&]*(?:\$|\.\.|~)[^\s;|&]*",  # a path that is only known at run time
+    r"(?![/-])[^\s;|&]+",  # relative to wherever the shell happens to be
+    r"/\*?",
+    r"/(?:etc|usr|lib|lib64|bin|sbin|overlay|rom|root|www|opt|var|tmp|proc|sys|dev|boot|mnt)(?:/\*|/)?",
+    r"/etc/(?:config|init\.d|rc\.d|ssl|apk|opkg|crontabs|dropbear|tailscale|hotplug\.d|uci-defaults)(?:/\*|/)?",
+    r"/usr/(?:bin|sbin|lib|share|libexec)(?:/\*|/)?",
+])
+FORBIDDEN = [(reason, re.compile(pattern, re.I)) for reason, pattern in [
+    ("перезагрузка и выключение", r"\b(reboot|poweroff|halt)\b"),
+    ("прошивка и сброс настроек", r"\b(sysupgrade|firstboot|jffs2reset|mtd)\b|factory[-_ ]?reset|\bmkfs|\bdd\s+(if|of)="),
+    ("пароли и ключи доступа", r"\bpasswd\b|/etc/shadow|authorized_keys"),
+    ("рекурсивное удаление системного каталога (можно удалять конкретные каталоги вроде /opt/zapret)",
+     r"\brm\s+(?:-\w+\s+)*-\w*[rR]\w*(?:\s+[^\s;|&]+)*?\s+(?:" + _RM_TARGET + ")" + _END),
+    ("tailscale", r"tailscale\s+(down|logout|set|up)"),
+    ("остановка сети, SSH, firewall, веб-интерфейса или cron",
+     r"(tailscale|dropbear|network|firewall|uhttpd|cron)\s+(stop|disable|restart|reload)|\b(ifdown|ifup|wifi)\b"),
+    ("настройки сети, Wi-Fi, firewall, SSH и tailscale", r"\buci\b.*\b(dropbear|tailscale|network|wireless|firewall)\b"),
     # packages may be removed (as an approved plan step), except the ones that keep the router reachable and booting
-    r"\b(apk\s+del|opkg\s+remove)\b[^;|&]*\b(tailscale\w*|dropbear|openssh\S*|busybox|base-files|netifd|procd|ubus\w*|uci|libc|musl"
-    r"|kernel|kmod-\S+|firewall4?|nftables\S*|dnsmasq\S*|odhcp\S+|apk\S*|opkg|curl|libcurl\S*|ca-bundle|ca-certificates|uhttpd\S*|luci(?:-(?:base|ssl|light|nginx|mod-\S+|lib-\S+|theme-\S+))?(?![\w-])|wpad\S*|hostapd\S*)",
-    r"rmon", r"(zapret2?|forkop|sing-box)\s+disable",
-    r"(curl|wget)[^|;&]*\|\s*(ba)?sh",
-]), re.I)
+    ("удаление системного пакета",
+     r"\b(apk\s+del|opkg\s+remove)\b[^;|&]*\b(tailscale\w*|dropbear|openssh\S*|busybox|base-files|netifd|procd|ubus\w*|uci|libc|musl"
+     r"|kernel|kmod-\S+|firewall4?|nftables\S*|dnsmasq\S*|odhcp\S+|apk\S*|opkg|curl|libcurl\S*|ca-bundle|ca-certificates|uhttpd\S*"
+     r"|luci(?:-(?:base|ssl|light|nginx|mod-\S+|lib-\S+|theme-\S+))?(?![\w-])|wpad\S*|hostapd\S*)"),
+    ("агент мониторинга", r"rmon"),
+    ("отключение автозапуска zapret и forkop", r"(zapret2?|forkop|sing-box)\s+disable"),
+    ("запуск скрипта прямо из сети", r"(curl|wget)[^|;&]*\|\s*(ba)?sh"),
+]]
+
+
+def forbidden(command):
+    """The reason a command is never run, or None."""
+    return next((reason for reason, pattern in FORBIDDEN if pattern.search(command)), None)
+
 
 # Everything outside the approved plan must be a read. This is an allowlist: a command
 # line passes only if every part of it is a known read-only command.
@@ -67,7 +89,8 @@ SUB = {
     "ip": lambda a: not _IP_WRITE & set(a),
     "forkop": lambda a: bool(a) and a[0].startswith(("get_", "check_", "show_")),
     "ubus": lambda a: a[:1] == ["list"],
-    "apk": lambda a: a[:1] in (["info"], ["list"], ["version"], ["policy"]),
+    "apk": lambda a: a[:1] in (["info"], ["list"], ["version"], ["policy"], ["search"]),
+    "sed": lambda a: len(a) >= 2 and a[0] == "-n" and re.fullmatch(r"[0-9,;p$ ]+", a[1]) is not None,
     "opkg": lambda a: a[:1] in (["list"], ["list-installed"], ["info"], ["status"]),
     "service": lambda a: a[1:2] == ["status"],
     "sing-box": lambda a: a[:1] == ["version"],
@@ -195,9 +218,11 @@ async def router_run(device: str, command: str, timeout: int = 60) -> str:
         return f"Роутер «{device}» не входит в эту задачу."
     if not _budget():
         return "Лимит вызовов исчерпан. Заверши работу и выдай итог по тому, что уже известно."
-    if FORBIDDEN.search(command):
-        _log(device, command, None, "refused: forbidden")
-        return "Отказано: команда из запрещённого списка (перезагрузка, прошивка, сеть, SSH, tailscale, удаление системных пакетов)."
+    reason = forbidden(command)
+    if reason:
+        _log(device, command, None, f"refused: forbidden: {reason}")
+        return (f"Отказано, это запрещено всегда: {reason}. Остальные части команды допустимы — "
+                "если без запрещённой части задача решается, владельцу нужен новый план без неё.")
     if " ".join(command.split()) not in PLAN:
         reason = not_read_only(command)
         if reason:
