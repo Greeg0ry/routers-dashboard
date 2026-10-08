@@ -12,6 +12,7 @@ import httpx
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
+from itsdangerous import BadData, URLSafeTimedSerializer
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -57,8 +58,19 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
+LUCI_HOST = urlsplit(config.LUCI_URL).hostname
+LUCI_PATHS = ("/luci/", "/cgi-bin/", "/luci-static/", "/ubus")
+
+
+def on_luci_host(request: Request) -> bool:
+    return bool(LUCI_HOST) and request.headers.get("host", "").split(":")[0].lower() == LUCI_HOST
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    if on_luci_host(request) and not (request.url.path == "/enter" or request.url.path.startswith(LUCI_PATHS)):
+        # the LuCI address serves routers' pages and nothing of the dashboard itself
+        return PlainTextResponse("not found\n", status_code=404)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     if config.COOKIE_SECURE:
@@ -339,6 +351,48 @@ async def agent_install(device_id: str, token: str):
 # so the admin pages open in the browser without joining the tailnet. LuCI builds
 # its URLs from absolute paths; they get the prefix in HTML, redirects and cookies.
 
+# With LUCI_URL set, the dashboard only hands the browser over: /luci/<id>/ here answers
+# with a redirect to <LUCI_URL>/enter?t=<one-time ticket>, and that address keeps its own
+# cookie. The cookie names one router, the one opened last, so a page from router A can
+# reach only router A through the proxy.
+LUCI_COOKIE, LUCI_TICKET_SECONDS, LUCI_SESSION_SECONDS = "luci_session", 60, 4 * 3600
+_tickets = URLSafeTimedSerializer(config.SESSION_SECRET, salt="luci-ticket")
+_luci_cookies = URLSafeTimedSerializer(config.SESSION_SECRET, salt="luci-cookie")
+_used_tickets: dict[str, float] = {}
+
+
+def luci_allowed(request: Request, device_id: str) -> bool:
+    """May this request reach this router's LuCI?"""
+    if not LUCI_HOST:
+        return authed(request)
+    if not on_luci_host(request):
+        return False
+    try:
+        data = _luci_cookies.loads(request.cookies.get(LUCI_COOKIE, ""), max_age=LUCI_SESSION_SECONDS)
+    except BadData:
+        return False
+    return data.get("d") == device_id and data.get("v") == SESSION_VERSION
+
+
+@app.get("/enter")
+async def luci_enter(request: Request, t: str = ""):
+    """Trades the dashboard's one-time ticket for this address's own cookie."""
+    now = time.time()
+    for ticket in [k for k, expires in _used_tickets.items() if expires < now]:
+        del _used_tickets[ticket]
+    try:
+        data = _tickets.loads(t, max_age=LUCI_TICKET_SECONDS)
+    except BadData:
+        data = None
+    if not on_luci_host(request) or not data or t in _used_tickets or data.get("v") != SESSION_VERSION:
+        raise HTTPException(403, "forbidden")
+    _used_tickets[t] = now + LUCI_TICKET_SECONDS
+    response = RedirectResponse(f"/luci/{data['d']}/", 302)
+    response.set_cookie(LUCI_COOKIE, _luci_cookies.dumps({"d": data["d"], "v": SESSION_VERSION}),
+                        max_age=LUCI_SESSION_SECONDS, httponly=True, secure=config.COOKIE_SECURE, samesite="lax")
+    return response
+
+
 LUCI_METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE"]
 _HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
         "transfer-encoding", "upgrade"}
@@ -364,7 +418,20 @@ async def luci_root(device_id: str):
 
 @app.api_route("/luci/{device_id}/{path:path}", methods=LUCI_METHODS)
 async def luci(device_id: str, path: str, request: Request):
-    if not authed(request):
+    if LUCI_HOST and not on_luci_host(request):
+        # the dashboard's own address never serves a router's page
+        if request.method != "GET":
+            raise HTTPException(404, "not found")
+        if not authed(request):
+            return RedirectResponse("/login", 302)
+        if not db.one("SELECT 1 FROM devices WHERE id = ? AND present = 1", (device_id,)):
+            raise HTTPException(404, "not found")
+        ticket = _tickets.dumps({"d": device_id, "v": SESSION_VERSION})
+        return RedirectResponse(f"{config.LUCI_URL}/enter?t={ticket}", 302)
+    if not luci_allowed(request, device_id):
+        if LUCI_HOST:
+            return PlainTextResponse("Сеанс истёк или открыт другой роутер. Откройте LuCI заново из дашборда: "
+                                     f"{config.PUBLIC_URL}\n", status_code=403)
         if request.method == "GET":
             return RedirectResponse("/login", 302)
         raise HTTPException(401, "unauthorized")
@@ -378,12 +445,19 @@ async def luci(device_id: str, path: str, request: Request):
     url = f"{scheme}://{ip}{upstream_path}" + (f"?{request.url.query}" if request.url.query else "")
 
     headers = {k: v for k, v in request.headers.items() if k.lower() not in _REQUEST_DROP}
-    # the dashboard session must never reach a router
-    cookies = [c for c in request.headers.get("cookie", "").split("; ") if c and not c.startswith("monit_session=")]
+    # neither the dashboard session nor the proxy's own cookie may reach a router
+    cookies = [c for c in request.headers.get("cookie", "").split("; ")
+               if c and not c.startswith(("monit_session=", LUCI_COOKIE + "="))]
     if cookies:
         headers["cookie"] = "; ".join(cookies)
     headers["accept-encoding"] = "identity"
     body = request.stream() if request.method in ("POST", "PUT") else None
+    if body is not None and upstream_path.startswith("/ubus"):
+        # LuCI pages find their own files on the router by a path built from the URL they
+        # were loaded from ("/www" + "/luci/<id>/luci-static/..."); the router has no such
+        # directory, the list comes back empty and e.g. the status overview stays blank.
+        body = (await request.body()).replace(b"/www" + prefix.encode(), b"/www")
+        headers.pop("content-length", None)
     try:
         upstream = await _luci_client.send(
             _luci_client.build_request(request.method, url, headers=headers, content=body), stream=True)
@@ -425,8 +499,8 @@ async def luci(device_id: str, path: str, request: Request):
 
 async def luci_stray(request: Request):
     """An absolute LuCI URL that escaped rewriting: send it back under the prefix of the page it came from."""
-    origin = re.match(r"/luci/[^/]+(?=/)", urlsplit(request.headers.get("referer", "")).path)
-    if not origin or not authed(request):
+    origin = re.match(r"/luci/([^/]+)(?=/)", urlsplit(request.headers.get("referer", "")).path)
+    if not origin or not luci_allowed(request, origin[1]):
         raise HTTPException(404, "not found")
     query = f"?{request.url.query}" if request.url.query else ""
     return RedirectResponse(origin[0] + request.scope.get("raw_path", b"").decode("latin-1") + query, 307)

@@ -12,6 +12,11 @@ except OSError:
 
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "https://monit.rocky-rabbit.ru")
 
+# Routers' LuCI pages are served from this separate address, never from the dashboard's
+# own: a router's page is somebody else's code, and on the dashboard's origin it could
+# call the dashboard API with the owner's session. Empty = same origin (local development).
+LUCI_URL = os.environ.get("LUCI_URL", "").rstrip("/")
+
 # Auth
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
