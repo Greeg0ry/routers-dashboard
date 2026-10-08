@@ -70,6 +70,18 @@ _CURL_LONG = {"--max-time", "--connect-timeout", "--resolve", "--interface", "--
 _IP_WRITE = {"add", "del", "delete", "set", "flush", "replace", "change", "append", "prepend"}
 
 
+# Downloads are not reads, but packages and lists have to be fetched somewhere: /tmp is
+# always fine (it is RAM and gone after a reboot); while a plan is being carried out the
+# zapret directories are open too. Installing what was downloaded is still a plan step.
+DOWNLOAD_DIRS = ("/tmp/", "/opt/zapret/", "/opt/zapret2/") if MODE == "execute" else ("/tmp/",)
+_WGET_LONG = {"--no-check-certificate", "--timeout", "--tries", "--user-agent", "--header", "--quiet", "--spider",
+              "--continue", "--no-verbose", "--output-document", "--directory-prefix", "--show-progress", "--no-proxy"}
+
+
+def _download_to(path):
+    return path in ("-", "/dev/null") or (path.startswith(DOWNLOAD_DIRS) and ".." not in path and "$" not in path)
+
+
 def _curl(args):
     for i, arg in enumerate(args):
         if arg.startswith("--"):
@@ -78,9 +90,37 @@ def _curl(args):
         elif arg.startswith("-") and len(arg) > 1:
             if set(arg[1:]) & set("OTKcDXdFJ"):
                 return False
-            if "o" in arg[1:] and args[i + 1:i + 2] != ["/dev/null"]:
+            if "o" in arg[1:] and not (arg.endswith("o") and i + 1 < len(args) and _download_to(args[i + 1])):
                 return False
     return True
+
+
+def _wget(args):
+    """wget / uclient-fetch with an explicit destination inside DOWNLOAD_DIRS."""
+    target, i = None, 0
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith("--"):
+            name, _, value = arg.partition("=")
+            if name not in _WGET_LONG:
+                return False
+            if name in ("--output-document", "--directory-prefix"):
+                target = (value or "".join(args[i + 1:i + 2])) + ("/" if name == "--directory-prefix" else "")
+        elif arg.startswith("-") and len(arg) > 1:
+            flags = arg[1:]
+            for n, flag in enumerate(flags):
+                if flag in "OPUTt":  # these take a value: the rest of the cluster or the next argument
+                    value = flags[n + 1:]
+                    if not value:
+                        i += 1
+                        value = "".join(args[i:i + 1])
+                    if flag in "OP":
+                        target = value + ("/" if flag == "P" and not value.endswith("/") else "")
+                    break
+                if flag not in "qcSv46":
+                    return False
+        i += 1
+    return target is not None and _download_to(target)
 
 
 SUB = {
@@ -100,6 +140,8 @@ SUB = {
     "find": lambda a: not {"-delete", "-exec", "-ok", "-execdir", "-fprint"} & set(a),
     "awk": lambda a: not any(w in x for x in a for w in ("system", "getline", ">", "|")) and "-f" not in a,
     "curl": _curl,
+    "wget": _wget,
+    "uclient-fetch": _wget,
 }
 _REDIRECT = re.compile(r">>?\s*/dev/null(?![\w./])|>&[12]")
 
@@ -228,7 +270,8 @@ async def router_run(device: str, command: str, timeout: int = 60) -> str:
         if reason:
             _log(device, command, None, f"refused: {reason}")
             return (f"Отказано: {reason}. Вне утверждённого плана разрешены только команды чтения, "
-                    "соединённые через ; | && — без циклов, $(…) и записи в файлы."
+                    "соединённые через ; | && — без циклов, $(…) и записи в файлы, "
+                    f"и скачивание через wget -O / curl -o в {', '.join(DOWNLOAD_DIRS)}."
                     + ("" if MODE == "execute" else " Изменения включи в план исправления."))
     result, error = await collector.ssh_run(dev, command, max(5, min(int(timeout), 180)))
     if error:
