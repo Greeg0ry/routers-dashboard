@@ -246,6 +246,11 @@ async def _update(update, script) -> bool:
             f"--force-reinstall, а в {version or 'apk этой прошивки'} её нет: установка упала бы, откат тоже, "
             "и forkop остался бы остановлен. Сначала нужно обновить прошивку роутера (или пакет apk)."))
         return False
+    reason = await collector.low_memory(dev)
+    if reason:
+        # nothing was tried on it, so it says nothing about the release and the rollout goes on
+        _set(update["id"], stage="skipped", log=reason)
+        return True
     _set(update["id"], log="передаю установщик")
     # Detached from the SSH session: the update restarts networking pieces, and a
     # dropped connection must not kill the installer half-way.

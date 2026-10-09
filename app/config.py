@@ -66,6 +66,8 @@ MODEL_EXECUTE = os.environ.get("MODEL_EXECUTE", "haiku")
 EFFORT_INVESTIGATE = os.environ.get("EFFORT_INVESTIGATE", "medium")
 # 1 = carry out the plan without waiting for the confirmation button
 FIX_AUTO_APPLY = os.environ.get("FIX_AUTO_APPLY", "0") == "1"
+# Installs (forkop, sing-box) are not started on a router with less free memory than this, swap included.
+INSTALL_MIN_FREE_KB = int(os.environ.get("INSTALL_MIN_FREE_KB", "40000"))
 FIX_CONCURRENCY = int(os.environ.get("FIX_CONCURRENCY", "3"))
 # A plan that fixed a symptom is reused for the same symptom without a new investigation.
 PLAYBOOK_DAYS = int(os.environ.get("PLAYBOOK_DAYS", "30"))

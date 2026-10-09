@@ -120,6 +120,22 @@ async def ssh_run(dev, command, timeout, input=None):
     return None, "auth"
 
 
+# An install runs apk and restarts sing-box next to tailscaled. On a router short of memory
+# the kernel then kills one of them half-way (seen on 256 MB routers). Swap counts as room.
+MEM_FREE = "awk '/^MemAvailable:/{a=$2} /^SwapFree:/{s=$2} END{print a+s}' /proc/meminfo"
+
+
+async def low_memory(dev):
+    """Why an install must not start on this router now, or None when it has the memory for it."""
+    result, error = await ssh_run(dev, MEM_FREE, 30)
+    free = None if error else _int(str(result.stdout).strip(), None)
+    if free is None or free >= config.INSTALL_MIN_FREE_KB:
+        return None  # an unreachable router is the caller's own next SSH call to report
+    return (f"Не запускалось, на роутере ничего не изменено: свободно {free // 1024} МБ памяти (вместе со swap), "
+            f"для установки нужно от {config.INSTALL_MIN_FREE_KB // 1024} МБ — иначе ядро убивает sing-box или "
+            "tailscaled посреди установки. Повторите позже или включите на роутере zram-swap.")
+
+
 async def ssh_probe(dev):
     """Returns (kv, error). error is None, "auth", or a short description."""
     result, error = await ssh_run(dev, "sh -s", config.PROBE_TIMEOUT, input=PROBE)
@@ -297,6 +313,9 @@ def _eval_forkop(kv, res, info):
     res["forkop"] = ("ok", " · ".join(notes) or "работает")
 
 
+_OOM_LAST = re.compile(r"\[\s*([\d.]+)\].*Killed process \d+ \(([^)]+)\)")
+
+
 def evaluate(kv):
     res = {"reach": ("ok", "на связи, опрос по SSH")}
     info = {"source": "ssh", "model": kv.get("model", ""), "release": kv.get("release", ""),
@@ -304,6 +323,18 @@ def evaluate(kv):
     mem = kv.get("mem", "").split()
     if len(mem) == 2:
         info["mem_total"], info["mem_avail"] = _int(mem[0]), _int(mem[1])
+    swap = kv.get("swap", "").split()
+    if len(swap) == 2:
+        info["swap_total"], info["swap_free"] = _int(swap[0]), _int(swap[1])
+    rss = {name: _int(kb) for name, _, kb in (item.partition("=") for item in kv.get("rss", "").split()) if _int(kb)}
+    if rss:
+        info["rss"] = rss
+    if kv.get("oom", "").strip().isdigit():
+        info["oom"] = int(kv["oom"])
+        last = _OOM_LAST.search(kv.get("oom_last", ""))
+        if last and info["uptime"] is not None:
+            # dmesg counts from boot, the dashboard shows wall-clock time
+            info["oom_last"] = {"name": last[2], "ts": db.now() - max(0, info["uptime"] - int(float(last[1])))}
     overlay = kv.get("overlay", "").split()
     if len(overlay) == 2:
         info["ovl_total"], info["ovl_avail"] = _int(overlay[0]), _int(overlay[1])

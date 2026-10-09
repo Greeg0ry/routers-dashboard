@@ -86,7 +86,22 @@ kv release "$DISTRIB_RELEASE"
 kv uptime "$(cut -d. -f1 /proc/uptime)"
 kv load "$(cut -d' ' -f1-3 /proc/loadavg)"
 kv mem "$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print t" "a}' /proc/meminfo)"
+kv swap "$(awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{print t" "f}' /proc/meminfo)"
 kv overlay "$(df -k /overlay 2>/dev/null | awk 'NR==2{print $2" "$4}')"
+# memory of the heavy daemons, and how often the kernel had to kill something for lack of it
+rss() {
+	s=0
+	for p in $(pidof "$1"); do
+		r=$(awk '/^VmRSS:/{print $2}' "/proc/$p/status" 2>/dev/null)
+		s=$((s + ${r:-0}))
+	done
+	echo "$s"
+}
+kv rss "tailscaled=$(rss tailscaled) sing-box=$(rss sing-box) nfqws=$(rss nfqws) nfqws2=$(rss nfqws2)"
+# counted in the kernel log: these kernels are built without the oom_kill counter in /proc/vmstat
+dmesg 2>/dev/null | grep 'Out of memory: Killed process' >"$T/oom"
+kv oom "$(wc -l <"$T/oom")"
+kv oom_last "$(tail -n 1 "$T/oom" | cut -c1-80)"
 
 # --- zapret / zapret2 ---------------------------------------------------------
 for z in zapret zapret2; do

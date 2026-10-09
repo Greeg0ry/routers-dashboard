@@ -232,10 +232,14 @@ async def _run(action_id, dev, action):
 
 async def _do(action_id, dev, action, report=True):
     """Runs the action on the router and records the outcome. True when forkop reported success,
-    None when the router could not be reached and nothing was started on it."""
+    None when nothing was started on it: the router could not be reached or is short of memory."""
+    check = action == "check_update"
+    reason = None if check else await collector.low_memory(dev)
+    if reason:
+        _set(action_id, stage="failed", log=reason)
+        return None
     if action == "install_x_clean":
         return await _clean(action_id, dev, report)
-    check = action == "check_update"
     # HUP is ignored so that a dropped SSH session cannot take the router's background job with it
     job, error = await _forkop(dev, f"(trap '' HUP; exec forkop component_action_async sing_box {action} '')", 60)
     if error:

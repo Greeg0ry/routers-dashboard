@@ -720,6 +720,10 @@ function renderDrawer() {
       fact('Аптайм', info.uptime != null ? dur(info.uptime) : null),
       fact('Нагрузка', info.load),
       fact('Память', info.mem_total ? `свободно ${size(info.mem_avail)} из ${size(info.mem_total)}` : null, usage(info.mem_total, info.mem_avail)),
+      info.swap_total ? fact('Swap', `свободно ${size(info.swap_free)} из ${size(info.swap_total)}`, usage(info.swap_total, info.swap_free)) : null,
+      info.rss ? fact('Память процессов', Object.entries(info.rss).sort((a, b) => b[1] - a[1]).map(([n, kb]) => `${n} ${size(kb)}`).join(' · ')) : null,
+      info.oom != null ? fact('Убито из-за нехватки памяти', info.oom
+        ? `${info.oom} раз по журналу ядра${info.oom_last ? ` · последним ${info.oom_last.name}, ${ago(info.oom_last.ts)}` : ''}` : 'нет') : null,
       fact('Накопитель', info.ovl_total ? `свободно ${size(info.ovl_avail)} из ${size(info.ovl_total)}` : null, usage(info.ovl_total, info.ovl_avail)),
       fact('zapret', (info.zapret || []).join(', ') || 'не установлен'),
       fact('forkop', info.forkop_version),
