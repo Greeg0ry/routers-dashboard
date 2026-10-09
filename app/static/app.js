@@ -541,6 +541,7 @@ function updateCard(d) {
 const SINGBOX_ACTION = {
   check_update: 'проверка обновления', install: 'обновление', install_x: 'установка Sing-Box X',
   install_extended: 'установка Extended', install_extended_compressed: 'установка Extended compressed',
+  install_x_clean: 'Sing-Box X с удалением прежней сборки',
 };
 const SINGBOX_BUILDS = [['x', 'x', 'Sing-Box X'], ['extended', 'extended', 'Extended'], ['compressed', 'compressed', 'Extended compressed']];
 
@@ -586,6 +587,19 @@ function singboxCard(d, blocked) {
   // a finished check has already said everything in the line above
   const shown = a && !(a.action === 'check_update' && a.stage === 'done');
   if (shown && a.log) box.append(h('pre', { class: 'log' }, a.log));
+  // forkop refused X because it wants room for the old and the new sing-box together
+  if (a && a.action === 'install_x' && a.stage === 'failed' && (a.log || '').includes('Not enough flash space') && s.variant !== 'x') {
+    box.append(h('div', { class: 'actions' }, h('button', {
+      class: 'btn', disabled: off,
+      'data-tip': 'X меньше прежней сборки, но forkop требует место под обе сразу. Здесь прежний пакет сначала скачивается в память роутера для отката, затем удаляется, и forkop ставит X на освободившееся место.',
+      onclick: () => {
+        if (window.confirm(`Удалить прежний sing-box на ${d.name} и поставить Sing-Box X? Интернет за роутером пропадёт на несколько минут. `
+          + 'Это в обход проверки места forkop: если X не встанет, прежний пакет возвращается из памяти роутера, но гарантии forkop здесь уже нет.')) {
+          singboxAction(d, 'x_clean', 'Запущено — прежний sing-box удаляется, ставится X');
+        }
+      },
+    }, h('span', { html: ICON.update }), 'Поставить X, удалив прежнюю сборку')));
+  }
   return h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Sing-box'),
     shown ? h('span', { class: `status-pill ${a.stage === 'done' ? 'ok' : a.stage === 'failed' ? 'problem' : 'nodata'}` },
       `${SINGBOX_ACTION[a.action] || a.action}: ${{ queued: 'в очереди', running: 'идёт', done: 'готово', failed: 'не удалось', skipped: 'пропущено' }[a.stage] || a.stage} · ${ago(a.updated || a.ts)}`) : null), box);

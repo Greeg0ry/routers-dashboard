@@ -22,10 +22,17 @@ log = logging.getLogger("monitor.singbox")
 
 # what the dashboard offers -> forkop's component action
 ACTIONS = {"check": "check_update", "update": "install", "x": "install_x",
-           "extended": "install_extended", "compressed": "install_extended_compressed"}
+           "extended": "install_extended", "compressed": "install_extended_compressed",
+           # not a forkop action: singbox_x.sh, for routers where forkop refuses X for lack of flash
+           "x_clean": "install_x_clean"}
+FLEET = ("update", "x", "extended", "compressed")
+CLEAN_SCRIPT = (config.BASE_DIR / "singbox_x.sh").read_text(encoding="utf-8").replace("\r\n", "\n")
+CLEAN_REMOTE = "/tmp/rmon-sbx-run"  # .sh, .log and .rc live next to each other on the router
+CLEAN_RESULT = re.compile(r"^RESULT=(\w+)$", re.M)
 TITLE = {"install": "обновление sing-box", "install_x": "установка Sing-Box X",
          "install_extended": "установка sing-box Extended",
-         "install_extended_compressed": "установка sing-box Extended compressed"}
+         "install_extended_compressed": "установка sing-box Extended compressed",
+         "install_x_clean": "установка Sing-Box X с удалением прежней сборки"}
 CHECK_TIMEOUT = 3 * 60
 INSTALL_TIMEOUT = 20 * 60
 _KIND = {action: kind for kind, action in ACTIONS.items()}
@@ -87,7 +94,7 @@ def _wanted(sb, action):
     """Whether this router still needs the fleet action: it may have been changed since it was queued."""
     if not sb:
         return False
-    return sb["outdated"] if action == "install" else sb["variant"] != _KIND[action]
+    return sb["outdated"] if action == "install" else sb["variant"] != _KIND[action].removesuffix("_clean")
 
 
 def start_all(kind="update"):
@@ -95,7 +102,7 @@ def start_all(kind="update"):
     ("x", "extended", "compressed") for every router that has another build. Returns (count, error)."""
     global _rollout
     action = ACTIONS.get(kind)
-    if not action or kind == "check":
+    if kind not in FLEET:
         return 0, "неизвестное действие"
     if _rollout and not _rollout.done():
         return 0, "массовое действие с sing-box уже идёт"
@@ -226,6 +233,8 @@ async def _run(action_id, dev, action):
 async def _do(action_id, dev, action, report=True):
     """Runs the action on the router and records the outcome. True when forkop reported success,
     None when the router could not be reached and nothing was started on it."""
+    if action == "install_x_clean":
+        return await _clean(action_id, dev, report)
     check = action == "check_update"
     # HUP is ignored so that a dropped SSH session cannot take the router's background job with it
     job, error = await _forkop(dev, f"(trap '' HUP; exec forkop component_action_async sing_box {action} '')", 60)
@@ -261,20 +270,69 @@ async def _do(action_id, dev, action, report=True):
         _set(action_id, stage="done" if ok else "failed", log=message, status=str(final.get("status") or ""),
              from_version=str(final.get("current_version") or ""), to_version=str(final.get("latest_version") or ""))
         return ok
-    # the build the router really has now, whatever the job said
+    if not ok:
+        message += "\n\nесли sing-box уже был затронут, forkop сам возвращает прежнюю сборку и запускается заново"
+    return await _finish(action_id, dev, action, ok, message, report)
+
+
+async def _finish(action_id, dev, action, ok, message, report, why=None):
+    """Records how an install ended: the build the router really has now, the log, the Telegram line."""
     now = collector.singbox_info((await _forkop(dev, "forkop get_system_info", 90))[0])
     if now:
         row = db.one("SELECT info FROM devices WHERE id = ?", (dev["id"],))
         db.x("UPDATE devices SET info = ? WHERE id = ?", (json.dumps({**db.loads(row["info"]), "singbox": now}), dev["id"]))
-    if not ok:
-        message += "\n\nесли sing-box уже был затронут, forkop сам возвращает прежнюю сборку и запускается заново"
     _set(action_id, stage="done" if ok else "failed", log=message, to_version=(now or {}).get("version"))
     collector.wake.set()  # the checks should show what the swap did to the services
     if not report:
         return ok
     row = db.one("SELECT * FROM singbox_actions WHERE id = ?", (action_id,))
+    why = why if why is not None else (message.splitlines() or [""])[0]
     line = (f"{'✅' if ok else '❌'} {row['name']}: {TITLE[action]}, {row['from_version'] or '?'} → {row['to_version'] or '?'}"
-            + ("" if ok else f" — {(message.splitlines() or [''])[0][:200]}"))
+            + ("" if ok else f" — {why[:200]}"))
     db.x("INSERT INTO outbox (ts, text) VALUES (?, ?)",
          (db.now(), f'📦 {html.escape(line)}\n\n<a href="{config.PUBLIC_URL}">Открыть дашборд</a>'))
     return ok
+
+
+CLEAN_VERDICT = {
+    "untouched": "на роутере ничего не изменено",
+    "rolled_back": "не получилось, прежний sing-box возвращён и forkop запущен",
+    "broken": "НЕ ПОЛУЧИЛОСЬ И ОТКАТ НЕ УДАЛСЯ: на роутере нет рабочего sing-box, forkop остановлен. Нужно чинить вручную",
+}
+
+
+async def _clean(action_id, dev, report):
+    """Sing-Box X where forkop refuses it for lack of flash: singbox_x.sh removes the old package first."""
+    # Detached from the SSH session: forkop is stopped half-way, and a dropped connection
+    # must not leave the router without any sing-box.
+    command = f"sh {CLEAN_REMOTE}.sh >{CLEAN_REMOTE}.log 2>&1; echo $? >{CLEAN_REMOTE}.rc"
+    result, error = await collector.ssh_run(
+        dev, f"rm -f {CLEAN_REMOTE}.rc {CLEAN_REMOTE}.log; cat >{CLEAN_REMOTE}.sh && "
+             f"{{ (trap '' HUP; exec sh -c '{command}') </dev/null >/dev/null 2>&1 & }}",
+        60, input=CLEAN_SCRIPT)
+    if error or result.exit_status != 0:
+        _set(action_id, stage="failed", log=f"не удалось запустить: {error or str(result.stderr)[:300]}")
+        return None
+    deadline, rc, tail, misses = time.time() + INSTALL_TIMEOUT, None, "", 0
+    while time.time() < deadline and rc is None:
+        await asyncio.sleep(10)
+        result, error = await collector.ssh_run(dev, f"cat {CLEAN_REMOTE}.rc 2>/dev/null; echo ---; cat {CLEAN_REMOTE}.log 2>/dev/null", 30)
+        if error:
+            misses += 1  # the tunnel may blink while forkop is stopped
+            if misses > 30:
+                break
+            continue
+        head, _, tail = str(result.stdout).partition("---\n")
+        tail = tail.strip()[-3000:]
+        _set(action_id, log=tail or "скрипт работает")
+        rc = int(head.strip()) if head.strip().lstrip("-").isdigit() else None
+    if rc is None:
+        _set(action_id, stage="failed", log=(tail + "\n\nне дождался завершения; скрипт на роутере доделывает сам — "
+                                              "нажмите «Проверить сейчас» и посмотрите сборку").strip())
+        return False
+    await collector.ssh_run(dev, f"rm -f {CLEAN_REMOTE}.sh {CLEAN_REMOTE}.rc {CLEAN_REMOTE}.log", 30)
+    found = CLEAN_RESULT.findall(tail)
+    verdict = found[-1] if found else "broken"
+    ok = verdict in ("ok", "already")
+    why = "" if ok else CLEAN_VERDICT.get(verdict, CLEAN_VERDICT["broken"])
+    return await _finish(action_id, dev, "install_x_clean", ok, tail if ok else f"{tail}\n\n{why}", report, why)

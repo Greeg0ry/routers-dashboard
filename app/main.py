@@ -316,7 +316,7 @@ async def forkop_cancel():
 
 @app.post("/api/devices/{device_id}/singbox", dependencies=[Depends(require_write)])
 async def singbox_action(device_id: str, request: Request):
-    """{"action": "check" | "update" | "x" | "extended" | "compressed"}"""
+    """{"action": "check" | "update" | "x" | "extended" | "compressed" | "x_clean"}"""
     error = singbox.start(device_id, str((await request.json()).get("action")))
     if error:
         raise HTTPException(409, error)
