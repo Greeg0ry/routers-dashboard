@@ -51,8 +51,12 @@ chatgpt.com отвечает curl кодом 403 и когда работает:
 - Не печатай содержимое /etc/sing-box/config.json и секреты прокси целиком — выбирай нужные поля через grep/jsonfilter.
 - Экономь вызовы: объединяй команды через ';' в один вызов, фильтруй вывод на роутере (grep, tail -n 30). \
 `logread -f` и другие бесконечные команды запрещены.
-- Нельзя: перезагрузка, прошивка, сброс, смена паролей, настройки сети/Wi-Fi/firewall/SSH/tailscale, удаление системных \
+- Нельзя: перезагрузка, прошивка, сброс, смена паролей, настройки сети/firewall/SSH/tailscale, удаление системных \
 пакетов (ядро, сеть, SSH, tailscale, curl, LuCI), отключение автозапуска zapret и forkop.
+- Wi-Fi настраивать можно, но только шагами плана: `uci set wireless.…`, затем `uci commit wireless; wifi reload` \
+(не `/etc/init.d/network restart`). Текущее состояние смотри через `uci show wireless`, `wifi status`, `iwinfo`. \
+Имя сети и пароль бери дословно из запроса владельца, не придумывай; если их нет — fixable=false и спроси. \
+Интерфейсы в режиме sta (роутер сам подключён по Wi-Fi к другой сети) не трогай: через них может идти интернет роутера.
 - Остальные пакеты удалять можно (`apk del` / `opkg remove`), но только отдельным шагом плана с объяснением, зачем \
 это нужно, и после проверки, что от пакета ничего не зависит.
 - Пиши по-русски, коротко, без Markdown.
@@ -66,7 +70,10 @@ ROUTE_SYSTEM = """\
 В devices — имена роутеров точно как в таблице; пустой список — все роутеры, где есть такой сбой. \
 Если проблема не относится ни к одной проверке (другой сайт, скорость, Wi-Fi), оставь checks пустым и коротко \
 опиши проблему в problem.
-- intent "answer": вопрос или любое другое сообщение. Ответь сам в reply по данным таблицы: коротко, по-русски, \
+Сюда же относится просьба зайти на роутер и что-то проверить, посмотреть или настроить (содержимое файла, конфиг, \
+журнал, Wi-Fi): у тебя доступа к роутерам нет, а у следующего этапа есть. Не отвечай «не могу зайти на роутер» — \
+верни intent "fix", роутеры в devices, пустой checks и в problem дословно, что нужно проверить или сделать.
+- intent "answer": вопрос, на который хватает таблицы и заметок, или любое другое сообщение. Ответь сам в reply по данным таблицы: коротко, по-русски, \
 обычным текстом без разметки. Ничего не выдумывай: если данных в таблице и заметках нет, так и скажи.
 - intent "note": владелец просит что-то запомнить, сохранить или учитывать на будущее — ссылку на репозиторий, \
 источник пакетов, способ исправления, особенность роутера. В note запиши это одной самодостаточной заметкой: \
@@ -127,6 +134,10 @@ oaistatic.com, oaiusercontent.com), иначе он пойдёт напряму�
 Если причина не нашлась (так было с Discord: все адреса с роутера отвечают, а жалоба есть) — не выдумывай её. \
 Поставь fixable=false и напиши, что нужно узнать у человека: что именно не работает (вход, картинки, голос) и на \
 каком устройстве.
+Если владелец просит не починить, а проверить или посмотреть что-то на роутере (файл, конфиг, журнал) — сделай \
+это и ответь в diagnosis по существу, что нашёл (здесь можно длиннее трёх предложений). Нашёл проблему, которую \
+можно исправить, — предложи план как обычно. Всё в порядке и делать ничего не нужно — fixable=false, steps пустой, \
+healthy=true.
 Если с роутера это не исправить (лежит прокси-сервер, проблема у провайдера, нужен человек) — поставь \
 fixable=false, оставь steps пустым и объясни в diagnosis, что нужно сделать владельцу.
 diagnosis — 1–3 предложения для владельца: что сломано и почему. risk — насколько план может ухудшить \
@@ -139,6 +150,7 @@ PLAN_SCHEMA = {
     "properties": {
         "diagnosis": {"type": "string"},
         "fixable": {"type": "boolean"},
+        "healthy": {"type": "boolean"},
         "steps": {"type": "array", "items": {
             "type": "object",
             "properties": {"command": {"type": "string"}, "why": {"type": "string"}},
@@ -414,11 +426,13 @@ async def _route(job_id, text):
     for dev, checks in fleet:
         if wanted and dev["name"].lower() not in wanted:
             continue
-        failing = [n for n in (asked or FIXABLE) if n in checks and checks[n]["status"] == "fail"]
+        # a request of its own ("look at /etc/hosts", "set up Wi-Fi") is not about the checks that happen to fail
+        custom = bool(problem) and not asked
+        failing = [] if custom else [n for n in (asked or FIXABLE) if n in checks and checks[n]["status"] == "fail"]
         reachable = "reach" in checks and checks["reach"]["status"] == "ok"
         if not reachable and (wanted or failing):
             skipped.append(dev["name"])
-        elif failing or (wanted and problem and not asked):
+        elif failing or (wanted and custom):
             targets.append({"id": dev["id"], "name": dev["name"], "checks": failing})
     if _busy({t["id"] for t in targets}):
         _save(job_id, stage="done", reply="По этим роутерам уже есть незавершённая задача — дождитесь её или отмените.")
@@ -473,6 +487,7 @@ async def _plan(job_id, targets, problem=None, tried=None):
             path.unlink(missing_ok=True)
         _add_usage(job_id, "investigate", config.MODEL_INVESTIGATE, usage)
         group.update(diagnosis=str(answer["diagnosis"]), risk=answer.get("risk", "medium"), cached=False,
+                     healthy=bool(answer.get("healthy")),
                      lesson=str(answer.get("lesson") or "").strip(),
                      steps=[{"command": str(s["command"]), "why": str(s.get("why", ""))} for s in answer["steps"]][:8])
         group["fixable"] = bool(answer["fixable"]) and bool(group["steps"])

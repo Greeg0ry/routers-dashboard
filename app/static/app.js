@@ -398,7 +398,9 @@ function jobCard(d) {
   const box = h('div', { class: 'job' });
   for (const g of j.plan.filter((x) => x.devices.some((dev) => dev.id === d.id))) {
     box.append(h('p', {}, h('b', {}, g.checks.map((c) => LABEL[c]).join(', ') || 'Проблема'), ` — ${g.diagnosis || ''}`));
-    if (!g.fixable) box.append(h('p', { class: 'job-note' }, 'С роутера это не исправить.'));
+    if (!g.fixable) {
+      if (!g.healthy) box.append(h('p', { class: 'job-note' }, 'С роутера это не исправить.'));
+    }
     else if (!mine.length) {
       box.append(h('ol', {}, g.steps.map((s) => h('li', {}, h('code', {}, s.command), h('small', {}, s.why)))));
       if (g.cached) box.append(h('p', { class: 'job-note' }, 'План взят из сохранённых решений — он уже помогал при таком же сбое.'));

@@ -40,8 +40,10 @@ FORBIDDEN = [(reason, re.compile(pattern, re.I)) for reason, pattern in [
      r"\brm\s+(?:-\w+\s+)*-\w*[rR]\w*(?:\s+[^\s;|&]+)*?\s+(?:" + _RM_TARGET + ")" + _END),
     ("tailscale", r"tailscale\s+(down|logout|set|up)"),
     ("остановка сети, SSH, firewall, веб-интерфейса или cron",
-     r"(tailscale|dropbear|network|firewall|uhttpd|cron)\s+(stop|disable|restart|reload)|\b(ifdown|ifup|wifi)\b"),
-    ("настройки сети, Wi-Fi, firewall, SSH и tailscale", r"\buci\b.*\b(dropbear|tailscale|network|wireless|firewall)\b"),
+     r"(tailscale|dropbear|network|firewall|uhttpd|cron)\s+(stop|disable|restart|reload)|\b(ifdown|ifup)\b"),
+    # the config has to be named as an argument: `uci set wireless.x.network=lan` is a Wi-Fi setting, not a network one
+    ("настройки сети, firewall, SSH и tailscale",
+     r"\buci\b[^;|&]*[\s'\"](dropbear|tailscale|network|firewall)(?=[.\s'\";|&]|$)"),
     # packages may be removed (as an approved plan step), except the ones that keep the router reachable and booting
     ("удаление системного пакета",
      r"\b(apk\s+del|opkg\s+remove)\b[^;|&]*\b(tailscale\w*|dropbear|openssh\S*|busybox|base-files|netifd|procd|ubus\w*|uci|libc|musl"
@@ -133,6 +135,7 @@ SUB = {
     "sed": lambda a: len(a) >= 2 and a[0] == "-n" and re.fullmatch(r"[0-9,;p$ ]+", a[1]) is not None,
     "opkg": lambda a: a[:1] in (["list"], ["list-installed"], ["info"], ["status"]),
     "service": lambda a: a[1:2] == ["status"],
+    "wifi": lambda a: a == ["status"],
     "sing-box": lambda a: a[:1] == ["version"],
     "command": lambda a: a[:1] == ["-v"],
     "sysctl": lambda a: not any(x.startswith("-w") or x == "-p" or "=" in x for x in a),
@@ -209,9 +212,10 @@ def not_read_only(command):
 
 
 SECRETS = [
-    (re.compile(r'("(?:password|uuid|private_key|pre_shared_key|psk|secret|token|short_id|public_key)"\s*:\s*")[^"]+'), r"\1…"),
+    (re.compile(r'("(?:password|uuid|private_key|pre_shared_key|psk|secret|token|short_id|public_key|key|sae_password)"\s*:\s*")[^"]+'), r"\1…"),
     (re.compile(r"\b(vless|vmess|trojan|ss|hysteria2?|tuic|socks5?)://\S+"), r"\1://…"),
-    (re.compile(r"(option\s+(?:password|key|private_key|token|secret)\s+)\S+"), r"\1'…'"),
+    (re.compile(r"(option\s+(?:password|key|sae_password|private_key|token|secret)\s+)\S+"), r"\1'…'"),
+    (re.compile(r"(\bwireless\.\S+\.(?:key\d?|sae_password)=)\S+"), r"\1'…'"),  # uci show wireless
 ]
 
 mcp = FastMCP("rmon")

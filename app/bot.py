@@ -86,7 +86,8 @@ def _groups(job, steps=True):
         names = ", ".join(e(d["name"]) for d in g["devices"])
         lines = [f"<b>{title}</b> · {names}", e(g.get("diagnosis", ""))]
         if not g.get("fixable"):
-            lines.append("⚠️ С роутера это не исправить.")
+            if not g.get("healthy"):
+                lines.append("⚠️ С роутера это не исправить.")
         elif steps:
             lines += [f"{i}. <code>{e(s['command'])}</code>\n    <i>{e(s['why'])}</i>" for i, s in enumerate(g["steps"], 1)]
             lines.append(f"Риск: {RISK.get(g.get('risk'), '?')}" + (" · план из сохранённых решений" if g.get("cached") else ""))
