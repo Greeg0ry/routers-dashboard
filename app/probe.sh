@@ -70,6 +70,9 @@ if [ -x /usr/bin/forkop ]; then
 		forkop show_version 2>/dev/null | head -n 1 >"$T/f_version"
 		LAN=$(uci -q get network.lan.ipaddr | cut -d/ -f1)
 		[ -n "$LAN" ] && [ -z "$RMON_NO_CLASH" ] && curl -s -m 5 "http://$LAN:9090/proxies" 2>/dev/null | head -c 400000 | tr -d '\n' >"$T/f_clash"
+		# last: the slowest of the set, so the deadline below can only cut these two
+		forkop component_update_check_cache 2>/dev/null | head -c 16000 | tr -d '\n' >"$T/f_updcache"
+		forkop get_system_info 2>/dev/null | head -c 16000 | tr -d '\n' >"$T/f_sysinfo"
 	) </dev/null >/dev/null 2>&1 &
 	FP=$!
 else
@@ -109,7 +112,7 @@ if [ -n "$FP" ]; then
 		i=$((i + 1))
 	done
 	kill "$FP" 2>/dev/null
-	for f in status nft fakeip version clash; do
+	for f in status nft fakeip version clash updcache sysinfo; do
 		kv "forkop_$f" "$(cat "$T/f_$f" 2>/dev/null)"
 	done
 fi

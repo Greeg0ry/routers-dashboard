@@ -224,7 +224,9 @@ def _busy(device_ids):
     for row in db.q("SELECT targets FROM jobs WHERE stage IN ('routing','investigating','awaiting','executing')"):
         if any(t["id"] in device_ids for t in json.loads(row["targets"] or "[]")):
             return True
-    return False
+    # a sing-box check or swap started from the dashboard (singbox.py)
+    running = {r["device_id"] for r in db.q("SELECT device_id FROM singbox_actions WHERE stage = 'running'")}
+    return bool(running & set(device_ids))
 
 
 def recover():

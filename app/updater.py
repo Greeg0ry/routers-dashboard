@@ -17,7 +17,7 @@ import time
 
 import httpx
 
-from . import alerts, collector, config, db, fixer
+from . import alerts, collector, config, db, fixer, singbox
 
 log = logging.getLogger("monitor.updater")
 
@@ -139,7 +139,7 @@ def start(device_ids=None, flags=()):
         if not p or not p["target"] or (device_ids is not None and dev["id"] not in device_ids):
             continue
         reach = db.one("SELECT status FROM checks WHERE device_id = ? AND name = 'reach'", (dev["id"],))
-        if not p["outdated"] or not reach or reach["status"] != "ok" or fixer._busy({dev["id"]}):
+        if not p["outdated"] or not reach or reach["status"] != "ok" or fixer._busy({dev["id"]}) or singbox.busy(dev["id"]):
             continue
         chosen.append((dict(dev), p))
     if not chosen:
@@ -229,6 +229,9 @@ async def _update(update, script) -> bool:
         _set(update["id"], stage="failed", log="роутер пропал из списка")
         return False
     dev = dict(dev)
+    if singbox.busy(dev["id"]):
+        _set(update["id"], stage="failed", log="Обновление не запускалось: на роутере сейчас меняется sing-box. Повторите позже.")
+        return False
     _set(update["id"], stage="running", log="проверяю роутер")
     before = db.one("SELECT status FROM checks WHERE device_id = ? AND name = 'forkop'", (dev["id"],))
     was_running = bool(before) and before["status"] == "ok"

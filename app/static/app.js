@@ -20,6 +20,7 @@ const ICON = {
   wrench: svg('<path d="M14.5 6.5a4 4 0 0 0 5 5L21 13l-8.5 8.5a2.1 2.1 0 0 1-3-3L18 10"/><path d="M14.5 6.5L17 4a5 5 0 0 0-6.5 6.5L3 18a2.1 2.1 0 0 0 3 3l1.5-1.5"/>'),
   update: svg('<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>'),
   refresh: svg('<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>'),
+  search: svg('<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/>'),
 };
 ICON[''] = ICON.na;
 
@@ -355,7 +356,8 @@ async function loadDetail() {
       // a running repair is followed closely, everything else at the normal pace
       clearTimeout(state.jobTimer);
       const updating = detail.forkop_update && UPDATE_RUNNING.includes(detail.forkop_update.stage);
-      if ((detail.job && JOB_RUNNING.includes(detail.job.stage)) || updating) state.jobTimer = setTimeout(loadDetail, 4000);
+      const swapping = detail.singbox && detail.singbox.action && detail.singbox.action.stage === 'running';
+      if ((detail.job && JOB_RUNNING.includes(detail.job.stage)) || updating || swapping) state.jobTimer = setTimeout(loadDetail, swapping ? 2500 : 4000);
     }
   } catch (e) {
     if (e.message !== 'unauthorized') toast(`Не удалось загрузить: ${e.message}`);
@@ -464,6 +466,59 @@ function updateCard(d) {
       `${UPDATE_STAGE[u.stage] || u.stage} · ${ago(u.updated || u.ts)}`)), box);
 }
 
+const SINGBOX_ACTION = {
+  check_update: 'проверка обновления', install: 'обновление', install_x: 'установка Sing-Box X',
+  install_extended: 'установка Extended', install_extended_compressed: 'установка Extended compressed',
+};
+const SINGBOX_BUILDS = [['x', 'x', 'Sing-Box X'], ['extended', 'extended', 'Extended'], ['compressed', 'compressed', 'Extended compressed']];
+
+async function singboxAction(d, action, started) {
+  try {
+    await api(`/api/devices/${encodeURIComponent(d.id)}/singbox`, { action });
+    toast(started);
+    await loadDetail();
+  } catch (e) {
+    toast(`Ошибка: ${e.message}`);
+  }
+}
+
+// sing-box on this router: installed build, update check, update and switching the build.
+// forkop on the router does all of it, the same way its own LuCI page does.
+function singboxCard(d, blocked) {
+  const s = d.singbox;
+  if (!s) return null;
+  const a = s.action;
+  const running = Boolean(a && a.stage === 'running');
+  const off = blocked || running;
+  const install = (action, what) => {
+    if (window.confirm(`${what} на ${d.name}? Интернет за роутером пропадёт на несколько минут: forkop останавливается, пока меняется sing-box. Если что-то пойдёт не так, forkop сам вернёт прежнюю сборку.`)) {
+      singboxAction(d, action, 'Запущено — forkop меняет sing-box');
+    }
+  };
+  const note = { tiny: ' (tiny)', compressed: ' (compressed)' }[s.variant] || '';
+  const box = h('div', { class: 'job' },
+    h('p', {}, h('b', {}, s.variant === 'x' ? 'Sing-Box X' : 'Sing-box'), ` ${s.version}${note}`),
+    h('p', {}, s.outdated ? ['Доступна новая версия: ', h('b', {}, s.latest)]
+      : s.latest ? `Установлена последняя версия · проверено ${ago(s.checked)}` : 'Обновления ещё не проверялись'),
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn', disabled: off, onclick: () => singboxAction(d, 'check', 'Проверяю обновление sing-box') },
+        h('span', { html: ICON.search }), 'Проверить обновление'),
+      h('button', { class: 'btn' + (s.outdated ? ' primary' : ''), disabled: off || !s.outdated,
+        'data-tip': s.outdated ? `Обновить установленную сборку до ${s.latest}` : 'Новой версии нет — сначала проверьте обновление',
+        onclick: () => install('update', `Обновить sing-box до ${s.latest}`) },
+        h('span', { html: ICON.refresh }), 'Обновить')),
+    h('p', { class: 'job-note' }, 'Установить другую сборку:'),
+    h('div', { class: 'actions' }, SINGBOX_BUILDS.filter(([, variant]) => variant !== s.variant).map(([action, , label]) =>
+      h('button', { class: 'btn', disabled: off, onclick: () => install(action, `Установить ${label}`) },
+        h('span', { html: ICON.update }), label))));
+  // a finished check has already said everything in the line above
+  const shown = a && !(a.action === 'check_update' && a.stage === 'done');
+  if (shown && a.log) box.append(h('pre', { class: 'log' }, a.log));
+  return h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Sing-box'),
+    shown ? h('span', { class: `status-pill ${a.stage === 'done' ? 'ok' : a.stage === 'failed' ? 'problem' : 'nodata'}` },
+      `${SINGBOX_ACTION[a.action] || a.action}: ${{ running: 'идёт', done: 'готово', failed: 'не удалось' }[a.stage] || a.stage} · ${ago(a.updated || a.ts)}`) : null), box);
+}
+
 function renderDrawer() {
   const drawer = $('drawer');
   const base = state.data && state.data.devices.find((x) => x.id === state.openId);
@@ -529,8 +584,9 @@ function renderDrawer() {
 
   const fp = state.data.forkop && state.data.forkop.devices[d.id];
   const updating = d.forkop_update && UPDATE_RUNNING.includes(d.forkop_update.stage);
+  const swapping = Boolean(d.singbox && d.singbox.action && d.singbox.action.stage === 'running');
   const updateBtn = fp && h('button', {
-    class: 'btn', disabled: !fp.outdated || updating || working || o === 'offline' || o === 'nodata' || state.data.forkop.rollout.active,
+    class: 'btn', disabled: !fp.outdated || updating || working || swapping || o === 'offline' || o === 'nodata' || state.data.forkop.rollout.active,
     'data-tip': fp.outdated
       ? `Установщик из репозитория Screamshow/forkop: ${fp.current} → ${fp.target} (канал ${fp.channel}). Настройки сохраняются, при сбое установщик сам откатывает версию.`
       : `Установлена ${fp.current}${fp.target ? ', это последняя версия канала ' + fp.channel : ''}`,
@@ -581,13 +637,15 @@ function renderDrawer() {
       fact('Накопитель', info.ovl_total ? `свободно ${size(info.ovl_avail)} из ${size(info.ovl_total)}` : null, usage(info.ovl_total, info.ovl_avail)),
       fact('zapret', (info.zapret || []).join(', ') || 'не установлен'),
       fact('forkop', info.forkop_version),
+      fact('sing-box', info.singbox ? `${info.singbox.version}${info.singbox.variant === 'stable' ? '' : ` (${info.singbox.variant})`}` : null),
       fact('Выход ChatGPT', info.gpt_loc),
       fact('В сети tailscale', d.online ? 'сейчас' : ago(d.last_seen)),
       fact('Данные получены', d.probe_ts ? ago(d.probe_ts) : null),
       fact('Источник данных', info.source === 'agent' ? 'агент на роутере' : info.source === 'ssh' ? 'опрос по SSH с сервера' : null),
     ));
 
-  const body = h('div', { class: 'drawer-body' }, actions, jobCard(d), updateCard(d), checks);
+  const body = h('div', { class: 'drawer-body' }, actions, jobCard(d), updateCard(d),
+    singboxCard(d, updating || working || o === 'offline' || o === 'nodata'), checks);
   if (info.proxies && info.proxies.length) {
     body.append(h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Прокси forkop')),
       h('ul', { class: 'proxies' }, info.proxies.map((p) => h('li', {},

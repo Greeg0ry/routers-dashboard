@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from urllib.parse import urlsplit
 
@@ -225,6 +226,25 @@ def _eval_zapret(kv, res, info):
     res["zapret"] = ("fail", "; ".join(problems)) if problems else ("ok", ", ".join(notes))
 
 
+_SINGBOX_X = re.compile(r"^v?\d+\.\d+\.\d+-x-(\d+\.\d+\.\d+\S*)$")
+
+
+def singbox_info(sysinfo, cache=None):
+    """sing-box build from `forkop get_system_info`, plus forkop's own cached update check. None when unknown."""
+    raw = str(sysinfo.get("sing_box_version") or "").strip() if isinstance(sysinfo, dict) else ""
+    if not raw or raw in ("unknown", "not installed"):
+        return None
+    x = _SINGBOX_X.match(raw)
+    variant = ("x" if x else "compressed" if sysinfo.get("sing_box_compressed") else
+               "extended" if sysinfo.get("sing_box_extended") else "tiny" if sysinfo.get("sing_box_tiny") else "stable")
+    out = {"raw": raw[:60], "version": (x.group(1) if x else raw)[:60], "variant": variant}
+    for r in (cache.get("results") or []) if isinstance(cache, dict) else []:
+        if isinstance(r, dict) and r.get("component") == "sing_box" and r.get("latest_version"):
+            out.update(latest=str(r["latest_version"])[:60], status=str(r.get("status") or ""),
+                       checked=_int(r.get("updated_at")))
+    return out
+
+
 def _eval_forkop(kv, res, info):
     if kv.get("forkop_installed") != "1":
         res["forkop"] = ("na", "не установлен")
@@ -235,6 +255,9 @@ def _eval_forkop(kv, res, info):
     version = (kv.get("forkop_version") or "").strip()[:40]
     if version:
         info["forkop_version"] = version
+    singbox = singbox_info(db.loads(kv.get("forkop_sysinfo")), db.loads(kv.get("forkop_updcache")))
+    if singbox:
+        info["singbox"] = singbox
 
     groups = []
     proxies = db.loads(kv.get("forkop_clash")).get("proxies") or {}
@@ -405,6 +428,12 @@ def _upsert_device(dev, ts):
 def _store(dev, results, info, error, ts):
     _upsert_device(dev, ts)
     if info is not None:
+        if "singbox" not in info and info.get("forkop_version"):
+            # the slowest part of the probe did not make its deadline: keep the last known build
+            row = db.one("SELECT info FROM devices WHERE id = ?", (dev["id"],))
+            known = db.loads(row["info"]).get("singbox") if row else None
+            if known:
+                info["singbox"] = known
         db.x("UPDATE devices SET probe_ts=?, probe_error=NULL, info=? WHERE id=?", (ts, json.dumps(info), dev["id"]))
     else:
         db.x("UPDATE devices SET probe_error=? WHERE id=?", (error, dev["id"]))

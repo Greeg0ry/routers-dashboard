@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import alerts, bot, claude, collector, config, db, fixer, updater
+from . import alerts, bot, claude, collector, config, db, fixer, singbox, updater
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 # httpx logs full request URLs at INFO, which would put the bot token in the journal
@@ -40,6 +40,7 @@ async def lifespan(app):
     if config.COLLECTOR_ENABLED:
         fixer.recover()
         updater.recover()
+        singbox.recover()
         tasks = [asyncio.create_task(collector.loop()), asyncio.create_task(alerts.sender_loop()),
                  asyncio.create_task(bot.loop())]
     else:
@@ -234,6 +235,7 @@ async def device_detail(device_id: str, hours: int = 24):
     device["agent_command"] = collector.install_command(device_id)
     device["job"] = _job(fixer.for_device(device_id))
     device["forkop_update"] = updater.last_for(device_id)
+    device["singbox"] = singbox.state(row)
     device["events"] = _events(db.q("SELECT * FROM events WHERE device_id = ? ORDER BY id DESC LIMIT 50", (device_id,)))
     return device
 
@@ -309,6 +311,15 @@ async def forkop_update(request: Request):
 @app.post("/api/forkop/cancel", dependencies=[Depends(require_write)])
 async def forkop_cancel():
     return {"skipped": updater.cancel()}
+
+
+@app.post("/api/devices/{device_id}/singbox", dependencies=[Depends(require_write)])
+async def singbox_action(device_id: str, request: Request):
+    """{"action": "check" | "update" | "x" | "extended" | "compressed"}"""
+    error = singbox.start(device_id, str((await request.json()).get("action")))
+    if error:
+        raise HTTPException(409, error)
+    return {"ok": True}
 
 
 @app.post("/api/refresh", dependencies=[Depends(require_write)])

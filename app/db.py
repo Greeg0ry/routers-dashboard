@@ -124,6 +124,21 @@ CREATE TABLE IF NOT EXISTS updates (
     log TEXT
 );
 CREATE INDEX IF NOT EXISTS updates_device ON updates (device_id, id);
+CREATE TABLE IF NOT EXISTS singbox_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    updated INTEGER,
+    device_id TEXT NOT NULL,
+    name TEXT,
+    action TEXT NOT NULL,
+    raw TEXT,
+    from_version TEXT,
+    to_version TEXT,
+    status TEXT,
+    stage TEXT NOT NULL,
+    log TEXT
+);
+CREATE INDEX IF NOT EXISTS singbox_actions_device ON singbox_actions (device_id, id);
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
