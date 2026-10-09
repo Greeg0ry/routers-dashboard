@@ -220,6 +220,7 @@ async def overview():
         "devices": devices,
         "events": _events(db.q("SELECT * FROM events ORDER BY id DESC LIMIT 40")),
         "forkop": updater.overview(),
+        "singbox": singbox.overview(),
         "claude": bool((await claude.auth_status()).get("loggedIn")) if config.COLLECTOR_ENABLED else False,
     }
 
@@ -320,6 +321,21 @@ async def singbox_action(device_id: str, request: Request):
     if error:
         raise HTTPException(409, error)
     return {"ok": True}
+
+
+@app.post("/api/singbox/update", dependencies=[Depends(require_write)])
+async def singbox_update(request: Request):
+    """{} updates sing-box wherever a newer version is waiting; {"build": "x" | "extended" | "compressed"}
+    installs that build on every router that has another one."""
+    count, error = singbox.start_all(str((await request.json()).get("build") or "update"))
+    if error:
+        raise HTTPException(409, error)
+    return {"count": count}
+
+
+@app.post("/api/singbox/cancel", dependencies=[Depends(require_write)])
+async def singbox_cancel():
+    return {"skipped": singbox.cancel()}
 
 
 @app.post("/api/refresh", dependencies=[Depends(require_write)])

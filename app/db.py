@@ -148,6 +148,8 @@ with _lock:
     _conn.executescript(SCHEMA)
     if "push_ts" not in [r["name"] for r in _conn.execute("PRAGMA table_info(devices)")]:
         _conn.execute("ALTER TABLE devices ADD COLUMN push_ts INTEGER")
+    if "batch" not in [r["name"] for r in _conn.execute("PRAGMA table_info(singbox_actions)")]:
+        _conn.execute("ALTER TABLE singbox_actions ADD COLUMN batch INTEGER")
 
 
 def q(sql, args=()):

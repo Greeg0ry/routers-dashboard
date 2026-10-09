@@ -264,7 +264,7 @@ a.btn { color: inherit; text-decoration: none; }
   margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); font-size: 12px; line-height: 1.45;
   max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
 }
-#forkop-all { display: inline-flex; align-items: center; gap: 8px; }
+#forkop-all, #singbox-all { display: inline-flex; align-items: center; gap: 8px; }
 .job-ok b { color: var(--good-ink); }
 .job-bad, .job-bad b { color: var(--bad-ink); }
 .agent { padding: 10px 16px 16px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }

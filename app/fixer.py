@@ -219,14 +219,21 @@ def for_device(device_id):
 
 
 def _busy(device_ids):
+    if _jobs_busy(device_ids):
+        return True
+    # a sing-box check or swap that is on the router right now (singbox.py); queued ones are not there yet
+    running = {r["device_id"] for r in db.q("SELECT device_id FROM singbox_actions WHERE stage = 'running'")}
+    return bool(running & set(device_ids))
+
+
+def _jobs_busy(device_ids):
+    """A repair job is working on, or waiting for approval for, one of these routers."""
     db.x("UPDATE jobs SET stage = 'cancelled', error = 'план не подтверждён за час' WHERE stage = 'awaiting' AND updated < ?",
          (db.now() - 3600,))
     for row in db.q("SELECT targets FROM jobs WHERE stage IN ('routing','investigating','awaiting','executing')"):
         if any(t["id"] in device_ids for t in json.loads(row["targets"] or "[]")):
             return True
-    # a sing-box check or swap started from the dashboard (singbox.py)
-    running = {r["device_id"] for r in db.q("SELECT device_id FROM singbox_actions WHERE stage = 'running'")}
-    return bool(running & set(device_ids))
+    return False
 
 
 def recover():

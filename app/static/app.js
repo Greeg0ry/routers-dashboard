@@ -314,10 +314,82 @@ function renderForkopAll(d) {
   }, h('span', { html: ICON.update }), outdated.length ? `Обновить forkop у всех · ${outdated.length}` : 'forkop обновлён у всех'));
 }
 
+// The same for sing-box: every router where forkop has found a newer version of the installed build.
+function renderSingboxAll(d) {
+  const s = d.singbox;
+  const box = $('singbox-all');
+  if (!s) return box.replaceChildren();
+  // the periodic refresh must not close the list while a build is being chosen
+  if (!s.rollout.active && document.activeElement && document.activeElement.tagName === 'SELECT' && box.contains(document.activeElement)) return;
+  const c = s.rollout.counts;
+  if (s.rollout.active) {
+    const total = Object.values(c).reduce((a, b) => a + b, 0);
+    return box.replaceChildren(h('span', { class: 'chip' }, `sing-box, ${SINGBOX_ACTION[s.rollout.action] || 'обновление'}: ${total - (c.queued || 0) - (c.running || 0)} из ${total}`),
+      h('button', { class: 'btn', onclick: async () => {
+        try {
+          await api('/api/singbox/cancel', {});
+          toast('Остальные роутеры пропущены; текущий доделывается');
+        } catch (e) {
+          toast(`Ошибка: ${e.message}`);
+        }
+        load();
+      } }, 'Остановить'));
+  }
+  const online = new Set(d.devices.filter((x) => x.checks.reach && x.checks.reach.status === 'ok').map((x) => x.id));
+  const outdated = s.outdated.filter((id) => online.has(id));
+  box.replaceChildren(h('button', {
+    class: 'btn', disabled: !outdated.length || (d.forkop && d.forkop.rollout.active),
+    'data-tip': outdated.length
+      ? 'Обновляется установленная сборка, тип сборки не меняется. Сначала один роутер, затем остальные по два; при первой неудаче обновление остановится.'
+      : 'Ни на одном доступном роутере forkop не нашёл новой версии sing-box. Роутеры, где обновления ещё не проверялись, сюда не попадают.',
+    onclick: async () => {
+      if (!window.confirm(`Обновить sing-box на ${outdated.length} роутерах? На каждом интернет пропадёт на несколько минут, пока forkop меняет sing-box.`)) return;
+      try {
+        const r = await api('/api/singbox/update', {});
+        toast(`Обновление sing-box запущено: роутеров ${r.count}`);
+        load();
+      } catch (e) {
+        toast(`Ошибка: ${e.message}`);
+      }
+    },
+  }, h('span', { html: ICON.update }), outdated.length ? `Обновить sing-box у всех · ${outdated.length}` : 'sing-box обновлён у всех'),
+  buildSelect(d, online));
+}
+
+// Moves the whole fleet to one build; the number is how many reachable routers have another one.
+function buildSelect(d, online) {
+  const known = d.devices.filter((x) => online.has(x.id) && x.info && x.info.singbox);
+  const select = h('select', { class: 'btn', 'aria-label': 'Установить сборку sing-box у всех', disabled: d.forkop && d.forkop.rollout.active,
+    'data-tip': 'Ставит выбранную сборку на все доступные роутеры, где стоит другая. Сначала один роутер, затем остальные по два; при первой неудаче установка остановится.',
+    onchange: async () => {
+      const build = select.value;
+      const label = select.selectedOptions[0].dataset.label;
+      const count = known.filter((x) => x.info.singbox.variant !== build).length;
+      select.value = '';
+      select.blur();
+      if (!build || !window.confirm(`Установить ${label} на ${count} роутерах? На каждом интернет пропадёт на несколько минут. `
+        + 'Если на роутере не хватит места, forkop откажется ставить сборку, и установка остановится на нём; при повторном запуске такой роутер пойдёт последним.')) return;
+      try {
+        const r = await api('/api/singbox/update', { build });
+        toast(`Установка ${label} запущена: роутеров ${r.count}`);
+        load();
+      } catch (e) {
+        toast(`Ошибка: ${e.message}`);
+      }
+    } },
+    h('option', { value: '' }, 'Установить сборку у всех…'),
+    SINGBOX_BUILDS.map(([build, , label]) => {
+      const count = known.filter((x) => x.info.singbox.variant !== build).length;
+      return h('option', { value: build, 'data-label': label, disabled: !count }, `${label} · ${count}`);
+    }));
+  return select;
+}
+
 function render() {
   const d = state.data;
   if (!d) return;
   renderForkopAll(d);
+  renderSingboxAll(d);
   renderTiles(d.devices);
   renderFilters(d.devices);
   renderTable(d);
@@ -356,7 +428,7 @@ async function loadDetail() {
       // a running repair is followed closely, everything else at the normal pace
       clearTimeout(state.jobTimer);
       const updating = detail.forkop_update && UPDATE_RUNNING.includes(detail.forkop_update.stage);
-      const swapping = detail.singbox && detail.singbox.action && detail.singbox.action.stage === 'running';
+      const swapping = detail.singbox && detail.singbox.action && ['queued', 'running'].includes(detail.singbox.action.stage);
       if ((detail.job && JOB_RUNNING.includes(detail.job.stage)) || updating || swapping) state.jobTimer = setTimeout(loadDetail, swapping ? 2500 : 4000);
     }
   } catch (e) {
@@ -488,7 +560,7 @@ function singboxCard(d, blocked) {
   const s = d.singbox;
   if (!s) return null;
   const a = s.action;
-  const running = Boolean(a && a.stage === 'running');
+  const running = Boolean(a && (a.stage === 'running' || a.stage === 'queued'));
   const off = blocked || running;
   const install = (action, what) => {
     if (window.confirm(`${what} на ${d.name}? Интернет за роутером пропадёт на несколько минут: forkop останавливается, пока меняется sing-box. Если что-то пойдёт не так, forkop сам вернёт прежнюю сборку.`)) {
@@ -516,7 +588,7 @@ function singboxCard(d, blocked) {
   if (shown && a.log) box.append(h('pre', { class: 'log' }, a.log));
   return h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', {}, 'Sing-box'),
     shown ? h('span', { class: `status-pill ${a.stage === 'done' ? 'ok' : a.stage === 'failed' ? 'problem' : 'nodata'}` },
-      `${SINGBOX_ACTION[a.action] || a.action}: ${{ running: 'идёт', done: 'готово', failed: 'не удалось' }[a.stage] || a.stage} · ${ago(a.updated || a.ts)}`) : null), box);
+      `${SINGBOX_ACTION[a.action] || a.action}: ${{ queued: 'в очереди', running: 'идёт', done: 'готово', failed: 'не удалось', skipped: 'пропущено' }[a.stage] || a.stage} · ${ago(a.updated || a.ts)}`) : null), box);
 }
 
 function renderDrawer() {
@@ -584,7 +656,7 @@ function renderDrawer() {
 
   const fp = state.data.forkop && state.data.forkop.devices[d.id];
   const updating = d.forkop_update && UPDATE_RUNNING.includes(d.forkop_update.stage);
-  const swapping = Boolean(d.singbox && d.singbox.action && d.singbox.action.stage === 'running');
+  const swapping = Boolean(d.singbox && d.singbox.action && ['queued', 'running'].includes(d.singbox.action.stage));
   const updateBtn = fp && h('button', {
     class: 'btn', disabled: !fp.outdated || updating || working || swapping || o === 'offline' || o === 'nodata' || state.data.forkop.rollout.active,
     'data-tip': fp.outdated
