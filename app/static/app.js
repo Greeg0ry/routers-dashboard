@@ -541,9 +541,11 @@ function updateCard(d) {
 const SINGBOX_ACTION = {
   check_update: 'проверка обновления', install: 'обновление', install_x: 'установка Sing-Box X',
   install_extended: 'установка Extended', install_extended_compressed: 'установка Extended compressed',
+  install_rust_x: 'установка Rust X',
   install_x_clean: 'Sing-Box X с удалением прежней сборки',
 };
-const SINGBOX_BUILDS = [['x', 'x', 'Sing-Box X'], ['extended', 'extended', 'Extended'], ['compressed', 'compressed', 'Extended compressed']];
+const SINGBOX_BUILDS = [['x', 'x', 'Sing-Box X'], ['extended', 'extended', 'Extended'],
+  ['compressed', 'compressed', 'Extended compressed'], ['rust_x', 'rust_x', 'Rust X (экспериментальный)']];
 
 async function singboxAction(d, action, started) {
   try {

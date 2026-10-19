@@ -23,15 +23,17 @@ log = logging.getLogger("monitor.singbox")
 # what the dashboard offers -> forkop's component action
 ACTIONS = {"check": "check_update", "update": "install", "x": "install_x",
            "extended": "install_extended", "compressed": "install_extended_compressed",
+           "rust_x": "install_rust_x",
            # not a forkop action: singbox_x.sh, for routers where forkop refuses X for lack of flash
            "x_clean": "install_x_clean"}
-FLEET = ("update", "x", "extended", "compressed")
+FLEET = ("update", "x", "extended", "compressed", "rust_x")
 CLEAN_SCRIPT = (config.BASE_DIR / "singbox_x.sh").read_text(encoding="utf-8").replace("\r\n", "\n")
 CLEAN_REMOTE = "/tmp/rmon-sbx-run"  # .sh, .log and .rc live next to each other on the router
 CLEAN_RESULT = re.compile(r"^RESULT=(\w+)$", re.M)
 TITLE = {"install": "обновление sing-box", "install_x": "установка Sing-Box X",
          "install_extended": "установка sing-box Extended",
          "install_extended_compressed": "установка sing-box Extended compressed",
+         "install_rust_x": "установка Sing-Box Rust X (экспериментальный)",
          "install_x_clean": "установка Sing-Box X с удалением прежней сборки"}
 CHECK_TIMEOUT = 3 * 60
 INSTALL_TIMEOUT = 20 * 60
