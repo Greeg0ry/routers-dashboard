@@ -85,8 +85,11 @@ async def _get_installer():
         r = await client.get(INSTALLER_URL)
         r.raise_for_status()
     text = r.text.replace("\r\n", "\n")
-    # a truncated or replaced download must never reach a router
-    if not text.startswith("#!/bin/sh") or 'REPO_NAME="forkop"' not in text or not text.rstrip().endswith('main "$@"'):
+    # A truncated or replaced download must never reach a router: it has to be a shell
+    # script, mention forkop, end at the installer's own entry point and take the
+    # --channel we pass it. Nothing is checked that forkop itself does not promise.
+    if (not text.startswith("#!/bin/sh") or "forkop" not in text.lower()
+            or "--channel" not in text or not text.rstrip().endswith('main "$@"')):
         raise ValueError("install.sh из репозитория не похож на установщик forkop")
     _installer.update(ts=time.time(), text=text)
     return text
