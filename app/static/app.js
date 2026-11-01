@@ -289,7 +289,7 @@ function renderForkopAll(d) {
   const c = f.rollout.counts;
   if (f.rollout.active) {
     const total = Object.values(c).reduce((a, b) => a + b, 0);
-    return box.replaceChildren(h('span', { class: 'chip' }, `forkop обновляется: ${(c.done || 0) + (c.failed || 0)} из ${total}`),
+    return box.replaceChildren(h('span', { class: 'chip' }, `forkop обновляется: ${total - (c.queued || 0) - (c.running || 0)} из ${total}`),
       h('button', { class: 'btn', onclick: async () => {
         await api('/api/forkop/cancel', {}).catch((e) => toast(`Ошибка: ${e.message}`));
         toast('Остальные роутеры пропущены; текущий доделывается');
@@ -299,7 +299,7 @@ function renderForkopAll(d) {
   box.replaceChildren(h('button', {
     class: 'btn', disabled: !outdated.length,
     'data-tip': outdated.length
-      ? `Последняя версия: ${f.latest.stable || '?'} (canary ${f.latest.canary || '?'}). Сначала обновится один роутер, затем остальные по два; при первой неудаче обновление остановится.`
+      ? `Последняя версия: ${f.latest.stable || '?'} (canary ${f.latest.canary || '?'}). Сначала обновится один роутер, затем остальные по два; недоступные роутеры и тайм-ауты пропускаются, подтверждённая ошибка остановит обновление.`
       : (f.latest.stable ? `На всех доступных роутерах уже последняя версия (${f.latest.stable})` : 'Не удалось узнать последнюю версию forkop'),
     onclick: async () => {
       if (!window.confirm(`Обновить forkop на ${outdated.length} роутерах? На время обновления интернет у людей за роутером может пропадать на минуту-две.`)) return;
@@ -336,35 +336,42 @@ function renderSingboxAll(d) {
       } }, 'Остановить'));
   }
   const online = new Set(d.devices.filter((x) => x.checks.reach && x.checks.reach.status === 'ok').map((x) => x.id));
-  const outdated = s.outdated.filter((id) => online.has(id));
+  const build = s.target_build || 'rust_x';
+  const label = (SINGBOX_BUILDS.find(([key]) => key === build) || [build, build, build])[2];
+  const outdated = d.devices.filter((x) => online.has(x.id) && x.info && x.info.singbox
+    && (singboxVariant(x.info.singbox) !== build || s.outdated.includes(x.id)));
   box.replaceChildren(h('button', {
     class: 'btn', disabled: !outdated.length || (d.forkop && d.forkop.rollout.active),
     'data-tip': outdated.length
-      ? 'Обновляется установленная сборка, тип сборки не меняется. Сначала один роутер, затем остальные по два; при первой неудаче обновление остановится.'
-      : 'Ни на одном доступном роутере forkop не нашёл новой версии sing-box. Роутеры, где обновления ещё не проверялись, сюда не попадают.',
+      ? `Устанавливается ${label} на оставшиеся роутеры и обновляется там, где найдена новая версия. Сначала один роутер, затем остальные по два; недоступные роутеры и тайм-ауты пропускаются, подтверждённая ошибка остановит обновление.`
+      : `На всех доступных роутерах установлена ${label}, известных обновлений нет.`,
     onclick: async () => {
-      if (!window.confirm(`Обновить sing-box на ${outdated.length} роутерах? На каждом интернет пропадёт на несколько минут, пока forkop меняет sing-box.`)) return;
+      if (!window.confirm(`Установить или обновить ${label} на ${outdated.length} роутерах? На каждом интернет пропадёт на несколько минут, пока forkop меняет sing-box.`)) return;
       try {
-        const r = await api('/api/singbox/update', {});
+        const r = await api('/api/singbox/update', { build });
         toast(`Обновление sing-box запущено: роутеров ${r.count}`);
         load();
       } catch (e) {
         toast(`Ошибка: ${e.message}`);
       }
     },
-  }, h('span', { html: ICON.update }), outdated.length ? `Обновить sing-box у всех · ${outdated.length}` : 'sing-box обновлён у всех'),
+  }, h('span', { html: ICON.update }), outdated.length ? `Обновить ${label} у всех · ${outdated.length}` : `${label} обновлён у всех`),
   buildSelect(d, online));
 }
 
 // Moves the whole fleet to one build; the number is how many reachable routers have another one.
+function singboxVariant(sb) {
+  return (sb.raw || '').includes('-rust-x') ? 'rust_x' : sb.variant;
+}
+
 function buildSelect(d, online) {
   const known = d.devices.filter((x) => online.has(x.id) && x.info && x.info.singbox);
   const select = h('select', { class: 'btn', 'aria-label': 'Установить сборку sing-box у всех', disabled: d.forkop && d.forkop.rollout.active,
-    'data-tip': 'Ставит выбранную сборку на все доступные роутеры, где стоит другая. Сначала один роутер, затем остальные по два; при первой неудаче установка остановится.',
+    'data-tip': 'Ставит выбранную сборку на оставшиеся роутеры и обновляет её. Недоступные роутеры и тайм-ауты пропускаются; подтверждённая ошибка остановит установку.',
     onchange: async () => {
       const build = select.value;
       const label = select.selectedOptions[0].dataset.label;
-      const count = known.filter((x) => x.info.singbox.variant !== build).length;
+      const count = known.filter((x) => singboxVariant(x.info.singbox) !== build || d.singbox.outdated.includes(x.id)).length;
       select.value = '';
       select.blur();
       if (!build || !window.confirm(`Установить ${label} на ${count} роутерах? На каждом интернет пропадёт на несколько минут. `
@@ -377,9 +384,9 @@ function buildSelect(d, online) {
         toast(`Ошибка: ${e.message}`);
       }
     } },
-    h('option', { value: '' }, 'Установить сборку у всех…'),
+    h('option', { value: '' }, `Сборка: ${(SINGBOX_BUILDS.find(([key]) => key === d.singbox.target_build) || SINGBOX_BUILDS.find(([key]) => key === 'rust_x'))[2]}`),
     SINGBOX_BUILDS.map(([build, , label]) => {
-      const count = known.filter((x) => x.info.singbox.variant !== build).length;
+      const count = known.filter((x) => singboxVariant(x.info.singbox) !== build || d.singbox.outdated.includes(x.id)).length;
       return h('option', { value: build, 'data-label': label, disabled: !count }, `${label} · ${count}`);
     }));
   return select;

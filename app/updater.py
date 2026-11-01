@@ -226,11 +226,11 @@ async def _revive(dev, was_running):
 
 
 async def _update(update, script) -> bool:
-    """One router. True when the new version is installed and forkop works."""
+    """One router. True when the rollout may continue, including an unreachable router."""
     dev = db.one("SELECT * FROM devices WHERE id = ?", (update["device_id"],))
     if not dev:
-        _set(update["id"], stage="failed", log="роутер пропал из списка")
-        return False
+        _set(update["id"], stage="skipped", log="роутер пропал из списка")
+        return True
     dev = dict(dev)
     if singbox.busy(dev["id"]):
         _set(update["id"], stage="failed", log="Обновление не запускалось: на роутере сейчас меняется sing-box. Повторите позже.")
@@ -240,8 +240,8 @@ async def _update(update, script) -> bool:
     was_running = bool(before) and before["status"] == "ok"
     result, error = await collector.ssh_run(dev, APK_CHECK, 40)
     if error:
-        _set(update["id"], stage="failed", log=f"роутер не отвечает по SSH: {error}")
-        return False
+        _set(update["id"], stage="skipped", log=f"роутер не отвечает по SSH: {error}")
+        return True
     if "APK_TOO_OLD" in str(result.stdout):
         version = str(result.stdout).replace("APK_TOO_OLD", "").strip()
         _set(update["id"], stage="failed", log=(
@@ -263,7 +263,10 @@ async def _update(update, script) -> bool:
         dev, f"rm -f {REMOTE}.rc {REMOTE}.log; {STALE_LEGACY} cat >{REMOTE}.sh && "
              f"{{ (trap '' HUP; exec sh -c '{command}') </dev/null >/dev/null 2>&1 & }}",
         60, input=script)
-    if error or result.exit_status != 0:
+    if error:
+        _set(update["id"], stage="skipped", log=f"нет ответа по SSH: {error}; установщик мог запуститься — проверьте версию")
+        return True
+    if result.exit_status != 0:
         _set(update["id"], stage="failed", log=f"не удалось запустить: {error or str(result.stderr)[:300]}")
         return False
 
@@ -280,10 +283,10 @@ async def _update(update, script) -> bool:
         tail = _ANSI.sub("", tail).strip()[-3000:]
         _set(update["id"], log=tail or "установщик работает")
         rc = int(head.strip()) if head.strip().lstrip("-").isdigit() else None
-    await collector.ssh_run(dev, f"rm -f {REMOTE}.sh {REMOTE}.rc", 30)
     if rc is None:
-        _set(update["id"], stage="failed", log=(tail + "\n\nне дождался завершения установщика").strip())
-        return False
+        _set(update["id"], stage="skipped", log=(tail + "\n\nне дождался завершения установщика; действие могло завершиться само — проверьте версию").strip())
+        return True
+    await collector.ssh_run(dev, f"rm -f {REMOTE}.sh {REMOTE}.rc", 30)
     if rc != 0:
         note = await _revive(dev, was_running)
         _set(update["id"], stage="failed", log=tail + f"\n\nустановщик завершился с кодом {rc}; прежнюю версию и настройки он возвращает сам" + note)
@@ -304,8 +307,8 @@ async def _update(update, script) -> bool:
         if status != "fail":
             break
     if error:
-        _set(update["id"], stage="failed", log=tail + f"\n\nустановщик завершился успешно, но проверить роутер не удалось: {error}")
-        return False
+        _set(update["id"], stage="skipped", log=tail + f"\n\nустановщик завершился успешно, но проверить роутер не удалось: {error}")
+        return True
     downs, ups = collector._store(dev, checked, info, None, db.now())
     alerts.queue(downs, ups)
     version = info.get("forkop_version") or "?"

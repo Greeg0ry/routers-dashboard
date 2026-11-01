@@ -60,6 +60,9 @@ def state(dev):
     sb = db.loads(dev["info"]).get("singbox")
     if not sb:
         return None
+    # Older probes classified Rust X as stable; recognise their cached version as well.
+    if "-rust-x" in sb.get("raw", ""):
+        sb = {**sb, "variant": "rust_x"}
     last = db.one("SELECT * FROM singbox_actions WHERE device_id = ? ORDER BY id DESC LIMIT 1", (dev["id"],))
     # a check asked from here beats the router's cached one while the same build is still installed
     check = db.one("SELECT * FROM singbox_actions WHERE device_id = ? AND action = 'check_update' AND stage = 'done' "
@@ -88,7 +91,9 @@ def overview():
     rows = db.q("SELECT stage, COUNT(*) AS n FROM singbox_actions WHERE batch = ? GROUP BY stage", (batch,)) if batch else []
     counts = {r["stage"]: r["n"] for r in rows}
     last = db.one("SELECT action FROM singbox_actions WHERE batch = ? LIMIT 1", (batch,)) if batch else None
-    return {"outdated": devices,
+    selected = db.one("SELECT action FROM singbox_actions WHERE batch IS NOT NULL AND action IN "
+                      "('install_x','install_extended','install_extended_compressed','install_rust_x') ORDER BY id DESC LIMIT 1")
+    return {"outdated": devices, "target_build": _KIND[selected["action"]] if selected else "rust_x",
             "rollout": {"batch": batch, "action": last["action"] if last else None, "counts": counts, "active": bool(counts.get("queued") or counts.get("running"))}}
 
 
@@ -96,7 +101,7 @@ def _wanted(sb, action):
     """Whether this router still needs the fleet action: it may have been changed since it was queued."""
     if not sb:
         return False
-    return sb["outdated"] if action == "install" else sb["variant"] != _KIND[action].removesuffix("_clean")
+    return sb["outdated"] if action == "install" else (sb["variant"] != _KIND[action].removesuffix("_clean") or sb["outdated"])
 
 
 def start_all(kind="update"):
@@ -234,7 +239,7 @@ async def _run(action_id, dev, action):
 
 async def _do(action_id, dev, action, report=True):
     """Runs the action on the router and records the outcome. True when forkop reported success,
-    None when nothing was started on it: the router could not be reached or is short of memory."""
+    None when unavailable or unconfirmed: the rollout may continue without claiming success."""
     check = action == "check_update"
     reason = None if check else await collector.low_memory(dev)
     if reason:
@@ -245,7 +250,7 @@ async def _do(action_id, dev, action, report=True):
     # HUP is ignored so that a dropped SSH session cannot take the router's background job with it
     job, error = await _forkop(dev, f"(trap '' HUP; exec forkop component_action_async sing_box {action} '')", 60)
     if error:
-        _set(action_id, stage="failed", log=f"роутер не отвечает по SSH: {error}")
+        _set(action_id, stage="skipped", log=f"роутер не отвечает по SSH: {error}; действие могло запуститься — проверьте версию")
         return None
     job_id = str(job.get("job_id") or "")
     if not job.get("success") or not _JOB_ID.match(job_id):
@@ -267,9 +272,9 @@ async def _do(action_id, dev, action, report=True):
         elif not status.get("running"):
             final = status
     if final is None:
-        _set(action_id, stage="failed", log="не дождался ответа роутера; действие могло завершиться само — "
+        _set(action_id, stage="skipped", log="не дождался ответа роутера; действие могло завершиться само — "
                                               "нажмите «Проверить сейчас» и посмотрите версию")
-        return False
+        return None
 
     ok, message = bool(final.get("success")), str(final.get("message") or "")[:1000]
     if check:
@@ -316,7 +321,10 @@ async def _clean(action_id, dev, report):
         dev, f"rm -f {CLEAN_REMOTE}.rc {CLEAN_REMOTE}.log; cat >{CLEAN_REMOTE}.sh && "
              f"{{ (trap '' HUP; exec sh -c '{command}') </dev/null >/dev/null 2>&1 & }}",
         60, input=CLEAN_SCRIPT)
-    if error or result.exit_status != 0:
+    if error:
+        _set(action_id, stage="skipped", log=f"нет ответа по SSH: {error}; скрипт мог запуститься — проверьте сборку")
+        return None
+    if result.exit_status != 0:
         _set(action_id, stage="failed", log=f"не удалось запустить: {error or str(result.stderr)[:300]}")
         return None
     deadline, rc, tail, misses = time.time() + INSTALL_TIMEOUT, None, "", 0
@@ -333,9 +341,9 @@ async def _clean(action_id, dev, report):
         _set(action_id, log=tail or "скрипт работает")
         rc = int(head.strip()) if head.strip().lstrip("-").isdigit() else None
     if rc is None:
-        _set(action_id, stage="failed", log=(tail + "\n\nне дождался завершения; скрипт на роутере доделывает сам — "
+        _set(action_id, stage="skipped", log=(tail + "\n\nне дождался завершения; скрипт на роутере доделывает сам — "
                                               "нажмите «Проверить сейчас» и посмотрите сборку").strip())
-        return False
+        return None
     await collector.ssh_run(dev, f"rm -f {CLEAN_REMOTE}.sh {CLEAN_REMOTE}.rc {CLEAN_REMOTE}.log", 30)
     found = CLEAN_RESULT.findall(tail)
     verdict = found[-1] if found else "broken"

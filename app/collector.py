@@ -251,7 +251,8 @@ def singbox_info(sysinfo, cache=None):
     if not raw or raw in ("unknown", "not installed"):
         return None
     x = _SINGBOX_X.match(raw)
-    variant = ("x" if x else "compressed" if sysinfo.get("sing_box_compressed") else
+    variant = ("rust_x" if sysinfo.get("sing_box_package") == "rust-x" or "-rust-x" in raw else
+               "x" if x else "compressed" if sysinfo.get("sing_box_compressed") else
                "extended" if sysinfo.get("sing_box_extended") else "tiny" if sysinfo.get("sing_box_tiny") else "stable")
     out = {"raw": raw[:60], "version": (x.group(1) if x else raw)[:60], "variant": variant}
     for r in (cache.get("results") or []) if isinstance(cache, dict) else []:
