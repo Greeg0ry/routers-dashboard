@@ -2,6 +2,7 @@
 # Piped to `sh -s` over SSH, prints "key<TAB>value" lines.
 main() {
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
 T=/tmp/.rmon.$$
 mkdir -p "$T" || exit 1
 trap 'rm -rf "$T"' EXIT INT TERM
@@ -9,11 +10,13 @@ trap 'rm -rf "$T"' EXIT INT TERM
 kv() { printf '%s\t%s\n' "$1" "$(printf '%s' "$2" | tr '\n\t' '  ')"; }
 yn() { "$@" >/dev/null 2>&1 && echo 1 || echo 0; }
 
+# @youtube_probe
+
 # --- service pools, in parallel -----------------------------------------------
 # A pool is every address a service needs to work fully. Each pool is one curl
 # process fetching its URLs in parallel, so a weak router is not flooded with
 # processes. Output per URL: "url http_code seconds".
-POOLS="internet google youtube chatgpt discord"
+POOLS="internet google chatgpt discord"
 SITES=""
 fetch() {
 	args=""
@@ -44,9 +47,8 @@ if command -v curl >/dev/null 2>&1; then
 	pool internet https://ya.ru/
 	pool google https://www.google.com/generate_204 https://www.gstatic.com/generate_204 \
 		https://accounts.google.com/generate_204 https://www.googleapis.com/generate_204
-	pool youtube https://www.youtube.com/generate_204 https://youtubei.googleapis.com/generate_204 \
-		https://i.ytimg.com/generate_204 https://yt3.ggpht.com/generate_204 \
-		https://manifest.googlevideo.com/generate_204
+	(youtube_probe >"$T/youtube") </dev/null 2>/dev/null &
+	SITES="$SITES $!"
 	pool chatgpt https://api.openai.com/v1/models https://chatgpt.com/cdn-cgi/trace \
 		https://auth.openai.com/ https://cdn.oaistatic.com/ https://ab.chatgpt.com/
 	pool discord https://discord.com/api/v9/gateway https://gateway.discord.gg/ \
@@ -118,6 +120,7 @@ done
 for f in $POOLS; do
 	kv "pool_$f" "$(cat "$T/p_$f" 2>/dev/null)"
 done
+[ -f "$T/youtube" ] && cat "$T/youtube"
 kv site_gpttrace "$(grep -E '^(loc|colo)=' "$T/trace" 2>/dev/null)"
 
 if [ -n "$FP" ]; then

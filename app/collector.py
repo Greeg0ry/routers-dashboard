@@ -10,13 +10,13 @@ from urllib.parse import urlsplit
 
 import asyncssh
 
-from . import alerts, config, db
+from . import alerts, config, db, youtube
 from .alerts import human
 
 log = logging.getLogger("monitor.collector")
 
 CHECKS = ["reach", "internet", "zapret", "forkop", "google", "youtube", "chatgpt", "discord"]
-# Checked as a pool of addresses; a failure counts once it has lasted SERVICE_FAIL_SECONDS.
+# Address pools (YouTube: playback evidence); failures must last SERVICE_FAIL_SECONDS.
 SERVICES = ("google", "youtube", "chatgpt", "discord")
 # A failing parent explains its children, so only the parent is alerted.
 PARENT = {
@@ -29,6 +29,7 @@ PARENT = {
     "discord": "internet",
 }
 PROBE = (config.BASE_DIR / "probe.sh").read_text(encoding="utf-8").replace("\r\n", "\n")
+PROBE = PROBE.replace("# @youtube_probe", (config.BASE_DIR / "youtube_probe.sh").read_text(encoding="utf-8"))
 PROBE_SHA = hashlib.sha256(PROBE.encode()).hexdigest()[:16]
 AGENT = (config.BASE_DIR / "agent.sh").read_text(encoding="utf-8").replace("\r\n", "\n")
 
@@ -200,9 +201,9 @@ def _eval_sites(kv, res, info):
     else:
         res["internet"] = ("fail", "ya.ru и google.com не отвечают")
 
-    # Voice (UDP) and the video CDN nodes are not covered by any pool.
+    # The YouTube probe verifies playback; ancillary hosts alone cannot do that.
     for name in SERVICES:
-        res[name] = _eval_pool(kv, name)
+        res[name] = youtube.evaluate(kv) if name == "youtube" else _eval_pool(kv, name)
 
     # chatgpt.com itself answers curl with a Cloudflare 403 even when it works,
     # so judge by the API (403 = country blocked) and the exit country.

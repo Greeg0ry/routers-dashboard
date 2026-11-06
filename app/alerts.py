@@ -24,7 +24,7 @@ DOWN_TEXT = {
     "zapret": "zapret не работает",
     "forkop": "forkop не работает",
     "google": "Google не открывается",
-    "youtube": "YouTube не открывается",
+    "youtube": "Не проходит проверка YouTube с роутера",
     "chatgpt": "ChatGPT не открывается",
     "discord": "Discord не открывается",
 }
@@ -34,7 +34,7 @@ UP_TEXT = {
     "zapret": "zapret снова работает",
     "forkop": "forkop снова работает",
     "google": "Google снова открывается",
-    "youtube": "YouTube снова открывается",
+    "youtube": "Передача видео YouTube подтверждена",
     "chatgpt": "ChatGPT снова открывается",
     "discord": "Discord снова открывается",
 }
